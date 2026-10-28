@@ -33,6 +33,9 @@ def build_item(d):
     dst.mkdir(parents=True, exist_ok=True)
     if piece.exists():
         shutil.copy(piece, dst / "piece.html")
+        for src in re.findall(r'src="([^"/]+\.mp4)"', piece.read_text(errors="ignore")):
+            if (d / src).exists():
+                shutil.copy(d / src, dst / src)  # 作品が素材として読む動画（slowdive の dive.mp4 など）はそのまま置く
     loop = dst / "loop.mp4"
     if mp4.exists() and (not loop.exists() or loop.stat().st_mtime < mp4.stat().st_mtime):
         subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", mp4, "-t", "8", "-an", "-vf", "scale=480:-2",
@@ -43,7 +46,6 @@ def build_item(d):
         "desc": first_sentence(d / "README.md") if (d / "README.md").exists() else "",
         "en": EN.get(d.name, "").strip(),
         "live": piece.exists(),
-        "photo": piece.exists() and 'type="file"' in piece.read_text(errors="ignore"),
     }
 
 
@@ -56,10 +58,9 @@ def player(i, n):
 
 def tile(i, n):
     href = f"lab/{i['dir']}/" if i["live"] else f"lab/{i['dir']}/loop.mp4"
-    note = " · load a photo" if i["photo"] else ""
     return (f'<a class="tile" href="{href}">'
             f'<video src="lab/{i["dir"]}/loop.mp4" muted loop playsinline preload="none"></video>'
-            f'<span class="cap"><b>#{n:03d}</b> {i["date"]} <i>{html.escape(i["name"])}</i>{note}'
+            f'<span class="cap"><b>#{n:03d}</b> {i["date"]} <i>{html.escape(i["name"])}</i>'
             f'<em>{html.escape(i["en"] or i["desc"])}</em></span></a>')
 
 

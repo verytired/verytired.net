@@ -87,7 +87,10 @@ stage.onload = () => {
     if (live) requestAnimationFrame(() => { $('prog').style.transition = `width ${dur ? dur.value : 15}s linear`; $('prog').style.width = '100%'; });
   }).observe(rec, { attributes: true });
 
-  D.addEventListener('click', () => { if (!playing && D.getElementById('play')) toggle(); });
+  // 素材の動画を読む作品（slowdive）は、Play を押すまで動画も止めておく
+  D.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { if (!playing) v.pause(); }));
+  D.querySelectorAll('video').forEach(v => v.pause());
+  D.addEventListener('click', () => { if (D.getElementById('play')) toggle(); });
   D.addEventListener('keydown', key);
 };
 
@@ -100,6 +103,7 @@ const toggle = async () => {
   const ac = get('ac');
   if (!playing) { if (ac && ac.state === 'suspended') await ac.resume(); else D.getElementById('play')?.click(); playing = true; }
   else { if (ac) await ac.suspend(); playing = false; }
+  D.querySelectorAll('video').forEach(v => playing ? v.play() : v.pause());
   sync();
 };
 $('play').onclick = toggle;
@@ -114,11 +118,13 @@ addEventListener('keydown', key);
 
 // メーター: 作品の AnalyserNode（an）から周波数を読み、中央から左右に広がる線で描く
 const m = $('meter'), mc = m.getContext('2d');
-let buf;
+let buf, own;
 const meter = () => {
   requestAnimationFrame(meter);
   m.width = innerWidth; m.height = 24;
-  const an = W && playing ? get('an') : null;
+  // an を持たない作品（modlines・slowdive）は、出力の out から分岐させて自前で作る
+  if (W && playing && !own && !get('an') && get('out')) { own = get('ac').createAnalyser(); get('out').connect(own); }
+  const an = W && playing ? get('an') || own : null;
   if (!an || !an.getByteFrequencyData) return;
   if (!buf || buf.length !== an.frequencyBinCount) buf = new Uint8Array(an.frequencyBinCount);
   an.getByteFrequencyData(buf);
