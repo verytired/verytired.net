@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scanner</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@900&family=Noto+Sans+JP:wght@100;900&family=DotGothic16&family=Zen+Old+Mincho&family=Space+Mono:wght@700&family=Anton&family=Bodoni+Moda:ital@1&family=Instrument+Serif:ital@1&family=Noto+Sans+SC:wght@100;900&family=Noto+Serif+SC:wght@900&family=Noto+Sans+KR:wght@100;900&family=Noto+Serif+KR:wght@900&family=Noto+Sans:wght@100;900&family=Noto+Serif:wght@900&family=Noto+Sans+Arabic:wght@100;900&family=Noto+Sans+Devanagari:wght@100;900&family=Noto+Sans+Thai:wght@100;900&family=Noto+Sans+Hebrew:wght@100;900&display=block">
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="15"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<canvas id="c"></canvas>
+
+<script>
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+let W, H;
+const setSize = () => { [W, H] = document.getElementById('aspect').value.split('x').map(Number); c.width = W; c.height = H; };
+document.getElementById('aspect').onchange = setSize; setSize();
+
+// 粒子：円盤（半径1）の上に並べた点群
+const N = 40000, ps = Array.from({ length: N }, () => {
+  // 25% は円盤全体（真横から見たときの線）、残りは盛り上がる中心に集める
+  const r = Math.random() < 0.25 ? Math.pow(Math.random(), 0.8) : Math.min(1, Math.abs(gauss()) * 0.35), th = Math.random() * 6.283;
+  const sy = Math.random() * 2 - 1, sa = Math.random() * 6.283, sr = Math.sqrt(1 - sy * sy);   // 球面上の方向
+  return { X: r * Math.cos(th), Z: r * Math.sin(th), r, th, q: Math.random(), g1: gauss(), g2: gauss(),
+    sx: sr * Math.cos(sa), sy, sz: sr * Math.sin(sa), x: 0, y: 0, z: 0 };
+});
+
+// 渦のポテンシャル（sin の重ね合わせ）を回転させた流れ場。発散がないので流体っぽく渦を巻く
+function psi(x, y, t) {
+  return Math.sin(x * 1.7 + t) * Math.cos(y * 2.1 - t * 0.8)
+    + 0.5 * Math.sin((x + y) * 3.3 - t * 1.3 + 1.7) * Math.cos((x - y) * 2.9 + t);
+}
+function curl(x, y, t) {
+  const e = 0.01;
+  return [(psi(x, y + e, t) - psi(x, y - e, t)) / (2 * e), -(psi(x + e, y, t) - psi(x - e, y, t)) / (2 * e)];
+}
+function gauss() { return (Math.random() + Math.random() + Math.random() - 1.5) / 1.5; }
+
+// --- 音 ---
+let ac, an, out, audioDest, fft;
+function startAudio() {
+  if (ac) return;
+  ac = new AudioContext();
+  out = ac.createGain(); out.gain.value = 0.8;
+  an = ac.createAnalyser(); an.fftSize = 1024; an.smoothingTimeConstant = 0.6;
+  fft = new Uint8Array(an.frequencyBinCount);
+  out.connect(an); out.connect(ac.destination); out.connect(audioDest = ac.createMediaStreamDestination());
+
+  // ドラムは歪ませてからまとめる
+  drums = ac.createWaveShaper();
+  drums.curve = Float32Array.from({ length: 1024 }, (_, i) => Math.tanh((i / 511.5 - 1) * 4));
+  const dg = ac.createGain(); dg.gain.value = 0.6; drums.connect(dg).connect(out);
+
+  // 空間：長いリバーブ。space に送ったものはすべて響く。付点8分のディレイは一部のスネアだけ
+  space = ac.createGain(); space.gain.value = 1;
+  const rev = ac.createConvolver(), len = ac.sampleRate * 5, ir = ac.createBuffer(2, len, ac.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {   // 左右で別のノイズ → 広がる。時間がたつほど高域を削る
+    const d = ir.getChannelData(ch); let y = 0;
+    for (let i = 0; i < len; i++) { const k = i / len; y += ((Math.random() * 2 - 1) - y) * (0.9 - 0.8 * k); d[i] = y * (1 - k) ** 3; }
+  }
+  rev.buffer = ir;
+  revOut = ac.createGain(); revOut.gain.value = 0.9; space.connect(rev).connect(revOut).connect(out);
+  const dly = ac.createDelay(1), fb = ac.createGain(), dlp = ac.createBiquadFilter();
+  dly.delayTime.value = 60 / 180 * 0.75; fb.gain.value = 0.45; dlp.type = 'lowpass'; dlp.frequency.value = 2500;
+  echo = dly; dly.connect(dlp).connect(fb).connect(dly); dlp.connect(space); dlp.connect(out);   // ディレイはスネアの一部だけ
+  // ドラムバスからは高域だけを少し響かせる（キックとベースはドライのまま）
+  const send = ac.createGain(), hp = ac.createBiquadFilter(); send.gain.value = 0.3; hp.type = 'highpass'; hp.frequency.value = 500;
+  dg.connect(hp).connect(send).connect(space);
+
+  // パッド：リバーブにだけ送る薄い和音（直接音なし）
+  [110, 164.8, 220, 261.6, 329.6].forEach((f, i) => {
+    const o = ac.createOscillator(), g = ac.createGain(), l = ac.createOscillator(), lg = ac.createGain();
+    o.type = 'triangle'; o.frequency.value = f; g.gain.value = 0.025;
+    l.frequency.value = 0.07 + i * 0.03; lg.gain.value = 0.02; l.connect(lg).connect(g.gain);   // ゆっくり揺らす
+    o.connect(g).connect(space); o.start(); l.start();
+  });
+
+  // リースベース：デチューンした saw 2本 → 歪み → ローパス。鳴らすのは gate で開け閉め
+  bassF = ac.createBiquadFilter(); bassF.type = 'lowpass'; bassF.frequency.value = 300; bassF.Q.value = 4;
+  bassG = ac.createGain(); bassG.gain.value = 0; bassF.connect(bassG).connect(drums);
+  bassO = [0, 0.7].map(dt => { const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 41 + dt; o.connect(bassF); o.start(); return o; });
+
+  // ノイズ源
+  const buf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  noise = () => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; return s; };
+
+  // 16分音符（180BPM）で鳴らすステップ
+  let next = ac.currentTime + 0.1, step = 0;
+  setInterval(() => {
+    while (next < ac.currentTime + 0.2) { play(step++, next); next += 60 / 180 / 4; }
+  }, 25);
+}
+let noise, drums, space, revOut, echo, bassF, bassG, bassO, pat;
+const ST = 60 / 180 / 4;
+function env(t, a, dcy, peak, node) { node.gain.setValueAtTime(0, t); node.gain.linearRampToValueAtTime(peak, t + a); node.gain.exponentialRampToValueAtTime(1e-4, t + a + dcy); }
+function kickAt(t, v = 1) {
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(220, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.12);
+  env(t, 0.001, 0.22, 1.4 * v, g); o.connect(g).connect(drums); o.start(t); o.stop(t + 0.3);
+  revOut.gain.setValueAtTime(0.25, t); revOut.gain.setTargetAtTime(0.9, t + 0.04, 0.1);   // キックの瞬間だけ残響を下げる
+}
+function snareAt(t, v = 1, pitch = 1) {
+  const n = noise(), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.frequency.value = 1800 * pitch; f.Q.value = 0.8;
+  const pn = ac.createStereoPanner(); pn.pan.value = (Math.random() * 2 - 1) * 0.7;
+  env(t, 0.001, 0.13, 1.1 * v, g); n.connect(f).connect(g).connect(pn).connect(drums); n.start(t); n.stop(t + 0.16);
+  if (v >= 1 && Math.random() < 0.25) pn.connect(echo);   // ときどきディレイに飛ばす
+  const o = ac.createOscillator(), og = ac.createGain();
+  o.frequency.setValueAtTime(330 * pitch, t); o.frequency.exponentialRampToValueAtTime(180 * pitch, t + 0.05);
+  env(t, 0.001, 0.07, 0.6 * v, og); o.connect(og).connect(drums); o.start(t); o.stop(t + 0.1);
+}
+function hatAt(t, v = 1) {
+  const n = noise(), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'highpass'; f.frequency.value = 7000;
+  const pn = ac.createStereoPanner(); pn.pan.value = Math.random() * 2 - 1;
+  env(t, 0.001, 0.03, 0.3 * v, g); n.connect(f).connect(g).connect(pn); pn.connect(out); pn.connect(space); n.start(t); n.stop(t + 0.05);
+}
+// アーメン風の基本形（K=キック S=スネア）を小節ごとにランダムに崩す
+const AMEN = 'K.K.S..SK.KKS..S';
+function newPattern(bar) {
+  if (bar % 8 === 7 && Math.random() < 0.5) return { drop: true };   // ときどき抜く
+  const p = [...AMEN].map(c => c === 'K' ? (Math.random() < 0.85 ? 'K' : '.') : c === 'S' ? (Math.random() < 0.9 ? 'S' : 'K') : (Math.random() < 0.18 ? 'KS'[Math.random() * 2 | 0] : '.'));
+  // 小節の後半をシャッフル（ブレイクの切り刻み）
+  if (Math.random() < 0.5) { const a = 8 + (Math.random() * 4 | 0) * 2; for (let i = 0; i < 4; i++) p[a + i] = p[(Math.random() * 16) | 0]; }
+  return { steps: p, roll: bar % 2 === 1 && Math.random() < 0.7, stutter: Math.random() < 0.35 ? 4 + (Math.random() * 8 | 0) : -1 };
+}
+function play(step, t) {
+  const bar = Math.floor(step / 16), s = step % 16;
+  if (s === 0) pat = newPattern(bar);
+  if (pat.drop) {   // 抜き：ベースのうねりだけ
+    if (s === 0) { bassG.gain.setTargetAtTime(0.5, t, 0.05); bassF.frequency.setValueAtTime(80, t); bassF.frequency.exponentialRampToValueAtTime(1200, t + ST * 16); }
+    return;
+  }
+  // スネアロール：最後の拍を32分→64分で連打してピッチを上げる
+  if (pat.roll && s >= 12) {
+    const n = s >= 14 ? 4 : 2;
+    for (let i = 0; i < n; i++) snareAt(t + i * ST / n, 0.6 + (s - 12) * 0.12, 1 + (s - 12 + i / n) * 0.25);
+    return;
+  }
+  // スタッター：同じ1音を細かく刻む
+  if (s === pat.stutter) { for (let i = 0; i < 6; i++) (i % 2 ? snareAt : kickAt)(t + i * ST / 3, 0.7); return; }
+  const c = pat.steps[s];
+  if (c === 'K') {
+    kickAt(t);
+    const f = [41, 41, 49, 55, 36.7][Math.random() * 5 | 0];   // ベースはキックと一緒に動く
+    bassO.forEach((o, i) => o.frequency.setValueAtTime(f + i * 0.7, t));
+    bassG.gain.setValueAtTime(0.45, t); bassG.gain.setTargetAtTime(0, t + 0.08, 0.06);
+    bassF.frequency.setValueAtTime(900, t); bassF.frequency.exponentialRampToValueAtTime(120, t + 0.2);
+  }
+  if (c === 'S') snareAt(t);
+  hatAt(t, s % 2 ? 0.5 : 1);
+  if (Math.random() < 0.06) {   // ノイズの破片
+    const n = noise(), g = ac.createGain(); env(t, 0.001, 0.05, 0.5, g); n.connect(g).connect(out); n.start(t); n.stop(t + 0.07);
+  }
+}
+
+// --- 映像 ---
+// 点群を3Dで回して投影する。キックで形とカメラアングルが、スネア・ハットでアングルが変わる
+let lvl = 0, prevBass = 0, prevHi = 0, kick = 0, lastBeat = 0, lastCut = 0, sd = [0, 0, 0];
+const views = [
+  { pitch: 0, roll: 0 },        // 真横 → 横線
+  { pitch: 0, roll: Math.PI / 2 },  // 真横を 90° ロール → 縦線
+  { pitch: 0, roll: -0.35 },    // 斜めの線
+  { pitch: 0.06, roll: 0 },        // 少し上から
+  { pitch: 1.1, roll: 0.2 },       // 上から → 楕円のリング
+];
+let view = views[0], yaw0 = 0, zoom = 1, mode = 'disc', rays = [], strokes = [];
+const modes = ['disc', 'disc', 'ring', 'lines', 'rays', 'sphere', 'glyph', 'glyph', 'glyph'];
+function newShape() {
+  mode = modes[Math.floor(Math.random() * modes.length)];
+  rays = Array.from({ length: 3 + Math.floor(Math.random() * 6) }, () => {
+    const y = Math.random() * 2 - 1, a = Math.random() * 6.283, r = Math.sqrt(1 - y * y);
+    return [r * Math.cos(a), y, r * Math.sin(a)];
+  });
+  // 文字・記号っぽいストローク：整数比のリサージュ曲線を1〜3本
+  const ri = n => 1 + Math.floor(Math.random() * n);
+  strokes = Array.from({ length: ri(3) }, () => ({
+    a: ri(3), b: ri(4), ph: Math.random() * 6.283, len: 0.4 + Math.random() * 0.6,
+    s: 0.12 + Math.random() * 0.18, ox: (Math.random() - 0.5) * 0.3, oy: (Math.random() - 0.5) * 0.3 }));
+}
+// 形ごとの目標位置（半径1の単位系）。e = 盛り上がりの強さ
+function shape(p, t, e) {
+  const env = Math.exp(-p.r * p.r / 0.08), j = 0.75 + p.q * 0.5;
+  switch (mode) {
+    case 'ring': {   // リング：上から見ると円、横から見ると線
+      const n = terrain(Math.cos(p.th) * 2, Math.sin(p.th) * 2, t), rr = 0.4 + p.g1 * 0.03 + n * e * 0.25 * j;
+      return [rr * Math.cos(p.th), p.g2 * 0.03 + n * e * 0.2 * j, rr * Math.sin(p.th)];
+    }
+    case 'lines': {  // 平行な直線の束
+      const li = Math.floor(p.q * 4), x = p.th / Math.PI - 1, n = terrain(x * 2, li, t);
+      return [x, n * e * 0.5 * Math.exp(-x * x / 0.15) + p.g2 * (0.01 + e * 0.05), (li - 1.5) * 0.06 + p.g1 * 0.015];
+    }
+    case 'rays': {   // 中心から放射状に伸びる線
+      const d = rays[Math.floor(p.q * rays.length)], l = p.r * (0.6 + e * 2), w = p.g1 * (0.03 + e * 0.05) * l;
+      return [d[0] * l + w, d[1] * l + p.g2 * (0.03 + e * 0.05) * l, d[2] * l - w];
+    }
+    case 'sphere': { // でこぼこした球の殻：どこから見ても円
+      const rr = 0.28 * (1 + terrain(p.sx * 3, p.sz * 3 + p.sy, t) * e * 1.2 * j);
+      return [p.sx * rr, p.sy * rr, p.sz * rr];
+    }
+    case 'glyph': {  // 文字・記号っぽい線。点はストロークに沿って並び、音でにじむ
+      const st = strokes[Math.floor(p.q * strokes.length)], u = p.th * st.len;
+      const blur = (0.015 + e * 0.06) * (0.4 + p.q * 1.2);   // 線のまわりに厚みとにじみ
+      return [st.ox + Math.sin(st.a * u + st.ph) * st.s + p.g1 * blur,
+        st.oy + Math.sin(st.b * u) * st.s + p.g2 * blur + terrain(u, st.a, t) * e * 0.15,
+        p.g2 * 0.06];
+    }
+    default:         // 地形：中心ほど高く盛り上がる
+      return [p.X, terrain(p.X * 2, p.Z * 2, t) * e * env * j, p.Z];
+  }
+}
+// --- タイポ ---
+// キックで語・フォント・配置が変わり、スネア・ハットで1文字だけフォントが変わって揺れる
+// 語は「走査・粒子・陽子・信号・点群」を各言語に訳したもの。文字の種類（script）ごとにフォント群を持つ
+const WORDS = {
+  ja: ['走査', '粒子', '陽子', '信号', '点群'],
+  zh: ['扫描', '质子', '点云'],
+  ko: ['스캔', '입자', '양성자', '신호'],
+  latin: ['SCAN', 'PARTICLE', 'PROTON', 'SIGNAL', 'TEILCHEN', 'ABTASTUNG', 'BALAYAGE', 'PARTICULE', 'ESCANEO', 'PARTÍCULA', 'PROTÓN', 'SEÑAL', 'SCANSIONE', 'SEGNALE'],
+  cyr: ['СКАН', 'ЧАСТИЦА', 'ПРОТОН', 'СИГНАЛ', 'ΣΑΡΩΣΗ', 'ΠΡΩΤΟΝΙΟ', 'ΣΗΜΑ'],
+  ar: ['مسح', 'جسيم', 'بروتون', 'إشارة'],
+  hi: ['स्कैन', 'कण', 'प्रोटॉन', 'संकेत'],
+  th: ['สแกน', 'อนุภาค', 'โปรตอน', 'สัญญาณ'],
+  he: ['סריקה', 'חלקיק', 'פרוטון', 'אות'],
+};
+const thin = n => ['normal', 100, n], bold = n => ['normal', 900, n];
+const F_JP = [bold('Noto Serif JP'), thin('Noto Sans JP'), bold('Noto Sans JP'), ['normal', 400, 'DotGothic16'], ['normal', 400, 'Zen Old Mincho']];
+const FONTS = {
+  ja: F_JP,
+  zh: [thin('Noto Sans SC'), bold('Noto Sans SC'), bold('Noto Serif SC')],
+  ko: [thin('Noto Sans KR'), bold('Noto Sans KR'), bold('Noto Serif KR')],
+  latin: [thin('Noto Sans'), bold('Noto Sans'), bold('Noto Serif'), ['normal', 700, 'Space Mono'], ['normal', 400, 'Anton'], ['italic', 400, 'Bodoni Moda'], ['italic', 400, 'Instrument Serif']],
+  cyr: [thin('Noto Sans'), bold('Noto Sans'), bold('Noto Serif')],
+  ar: [thin('Noto Sans Arabic'), bold('Noto Sans Arabic')],
+  hi: [thin('Noto Sans Devanagari'), bold('Noto Sans Devanagari')],
+  th: [thin('Noto Sans Thai'), bold('Noto Sans Thai')],
+  he: [thin('Noto Sans Hebrew'), bold('Noto Sans Hebrew')],
+};
+const WHOLE = new Set(['ar', 'hi', 'th', 'he']);   // 文字がつながる言語は1文字ずつに分けず語ごと描く
+const LIST = Object.entries(WORDS).flatMap(([sc, ws]) => ws.map(w => [sc, w]));
+const font = (f, px) => `${f[0]} ${f[1]} ${px}px "${f[2]}"`;
+// フォントは unicode-range ごとに読み込まれるので、使う文字を渡して先に読み込んでおく。読み込むまで文字は出さない
+let fontsOk = false;
+Promise.all(Object.entries(FONTS).flatMap(([sc, fs]) => fs.map(f => document.fonts.load(font(f, 40), WORDS[sc].join('')))))
+  .catch(() => {}).then(() => fontsOk = true);
+let typo = null;
+const pick = a => a[Math.floor(Math.random() * a.length)];
+function newTypo() {
+  if (!fontsOk) return;
+  const [sc, text] = pick(LIST), pool = FONTS[sc], f = pick(pool), chars = WHOLE.has(sc) ? [text] : [...text];
+  const layout = pick((sc === 'ja' || sc === 'zh') && chars.length <= 4 ? ['center', 'center', 'corner', 'vert'] : ['center', 'center', 'corner']);   // 縦書きは短い和文・中文だけ
+  typo = { chars, fonts: chars.map(() => f), pool, layout, glitch: 0,
+    comp: Math.random() < 0.75 ? 'difference' : 'lighter', top: Math.random() < 0.5, left: Math.random() < 0.5 };
+  typo.size = layout === 'center' ? W * (text.length > 6 ? 0.1 : 0.2) : layout === 'vert' ? W * 0.11 : W * 0.05;
+}
+function glitchTypo() {
+  if (!typo) return;
+  typo.fonts[Math.floor(Math.random() * typo.chars.length)] = pick(typo.pool); typo.glitch = 3;
+}
+function drawTypo(time) {
+  if (!typo) return;
+  const a = Math.max(0, 1 - Math.max(0, time - lastBeat - 1500) / 500);   // キックが来ないと消える
+  if (!a) return;
+  const { chars, fonts, size, layout } = typo, m = W * 0.06;
+  ctx.globalCompositeOperation = typo.comp; ctx.fillStyle = `rgba(255,255,255,${a})`; ctx.textBaseline = 'middle';
+  const jit = () => typo.glitch > 0 && Math.random() < 0.4 ? gauss() * size * 0.15 : 0;
+  if (layout === 'vert') {   // 縦書き：1文字ずつ下へ
+    const x = typo.left ? m + size / 2 : W - m - size / 2, y0 = H / 2 - (chars.length - 1) * size * 0.55;
+    ctx.textAlign = 'center';
+    chars.forEach((ch, i) => { ctx.font = font(fonts[i], size); ctx.fillText(ch, x + jit(), y0 + i * size * 1.1); });
+  } else {               // 横書き：文字ごとにフォントが違うので幅を測って並べる
+    const ws = chars.map((ch, i) => (ctx.font = font(fonts[i], size), ctx.measureText(ch).width)), tw = ws.reduce((s, w) => s + w, 0);
+    let x = layout === 'center' ? (W - tw) / 2 : typo.left ? m : W - m - tw;
+    const y = layout === 'center' ? H / 2 : typo.top ? m + size : H - m - size;
+    ctx.textAlign = 'left';
+    chars.forEach((ch, i) => { ctx.font = font(fonts[i], size); ctx.fillText(ch, x + jit(), y + jit()); x += ws[i]; });
+  }
+  typo.glitch--;
+}
+function cut(time) {
+  view = { ...views[Math.floor(Math.random() * views.length)] }; view.roll += gauss() * 0.5;
+  yaw0 = Math.random() * 6.283; zoom = 0.7 + Math.random() * 0.9; lastCut = time;
+}
+function terrain(x, z, t) {
+  const [a, b, c] = sd;
+  const n = Math.sin(x * 1.9 + t + a) * Math.cos(z * 2.3 - t * 0.7 + b)
+    + 0.5 * Math.sin((x + z) * 4.1 - t * 1.2 + c) * Math.cos((x - z) * 3.7 + t + a)
+    + 0.25 * Math.sin(x * 9.3 + b * 2) * Math.sin(z * 8.1 - t * 1.5 + c)
+    + 0.12 * Math.sin(x * 23 + z * 7 - t * 3) * Math.sin(z * 19 - x * 5 + t * 2.3);
+  return n > 0 ? n : n * 0.4;   // 上に盛り上がりやすく
+}
+function frame(time) {
+  requestAnimationFrame(frame);
+  const cx = W / 2, cy = H / 2, k = time / 1000;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(0, 0, W, H);   // 短い残像
+  let bass = 0;
+  if (an) { an.getByteFrequencyData(fft); for (let i = 1; i < 8; i++) bass += fft[i]; bass /= 7 * 255; }
+  let hi = 0; if (an) { for (let i = 80; i < 240; i++) hi += fft[i]; hi /= 160 * 255; }
+  lvl += (bass - lvl) * 0.2;
+  if (bass - prevBass > 0.06 && bass > 0.45 && time - lastBeat > 110) {
+    kick = 1; lastBeat = time;
+    sd = sd.map(() => Math.random() * 6.283);                       // 地形を作り直す
+    newShape(); cut(time); newTypo();   // キックで毎回、形とアングルと文字を変える
+  }
+  if (hi - prevHi > 0.05 && time - lastCut > 60) { cut(time); glitchTypo(); }   // スネア・ハットでもカット
+  prevBass = bass; prevHi = hi; kick *= 0.82;
+
+  const R = Math.max(W, H) * 0.6, D = Math.max(W, H) * 6;
+  const yaw = yaw0 + k * 0.25, cyw = Math.cos(yaw), syw = Math.sin(yaw);
+  const cp = Math.cos(view.pitch), sp = Math.sin(view.pitch), cr = Math.cos(view.roll), sr = Math.sin(view.roll);
+  const e = H / R * (0.02 + lvl * lvl * 0.35 + kick * 0.08), t = k * 2.4;
+
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  for (const p of ps) {
+    let [X, Y, Z] = shape(p, t, e);
+    // 水平方向は流れ場で渦を巻かせる
+    const [fx, fz] = curl(X * 2.5, Z * 2.5, t * 0.8 + sd[0]), sw = 0.006 + lvl * 0.035 + kick * 0.02;
+    X += fx * sw; Z += fz * sw;
+    const spray = 1 + kick * p.q * 0.3;                            // キック直後は外へ少し飛び散る
+    // 目標を追いかけるので、形が変わるときは流れ込むように移る
+    p.x += (X * spray * R - p.x) * 0.3; p.y += (Y * spray * R - p.y) * 0.3; p.z += (Z * spray * R - p.z) * 0.3;
+    X = p.x; Y = p.y; Z = p.z;
+    const x1 = X * cyw - Z * syw, z1 = X * syw + Z * cyw;
+    const y2 = Y * cp - z1 * sp, z2 = Y * sp + z1 * cp;
+    const x3 = x1 * cr - y2 * sr, y3 = x1 * sr + y2 * cr;
+    const s = D / (z2 + D) * zoom;
+    ctx.fillRect(cx + x3 * s, cy - y3 * s, 1.4, 1.4);
+  }
+
+  drawTypo(time);
+
+  // 強いキックで一瞬だけ画面にノイズ
+  if (kick > 0.8) {
+    ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    for (let i = 0; i < 3000; i++) ctx.fillRect(Math.random() * W, Math.random() * H, 2, 2);
+  }
+}
+requestAnimationFrame(frame);
+
+document.getElementById('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+
+document.getElementById('rec').onclick = e => {
+  startAudio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 12e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(window.lastBlob = new Blob(chunks, { type }));
+    a.download = `scanner_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+</script>
+</body>
+</html>
