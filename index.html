@@ -1,9 +1,78 @@
-<!-- index.html -->
-<!DOCTYPE html>
-<html>
-<head><title>Test</title></head>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>verytired.net</title>
+<meta name="description" content="Experiments in sound and image, made with code.">
+<style>
+  :root { --bg: #121214; --fg: #ececec; --dim: #8a8a8a; --accent: #5cc8ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+  a { color: inherit; text-decoration: none; }
+  /* 背景の文字にゆっくり流れる虹色を塗る（文字ごとに色を付けず、グラデーションを文字で切り抜く） */
+  #field { background: linear-gradient(115deg, #3d7bff, #3df2ff, #7a5cff, #d23dff, #3d7bff) 0 0 / 300% 300%;
+           -webkit-background-clip: text; background-clip: text; color: transparent; animation: psy 24s linear infinite; }
+  @keyframes psy { to { background-position: 300% 300%; } }
+  @media (prefers-reduced-motion: reduce) { #field { animation: none; } }
+  #field { position: fixed; inset: 0; margin: 0; opacity: .28; overflow: hidden; pointer-events: none; z-index: -1; line-height: 1; }
+  header { padding: 24px 16px 8px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 13px; margin: 0; font-weight: normal; color: var(--accent); }
+  header span { color: var(--dim); }
+  main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .tile { display: block; background: var(--bg); }
+  .tile video { width: 100%; aspect-ratio: 1; display: block; background: #000; transition: transform .2s; }
+  .tile:hover video { transform: scale(1.015); }
+  .cap { display: block; padding: 6px 0; }
+  .cap b { color: var(--accent); font-weight: normal; }
+  .cap i { font-style: normal; }
+  .cap em { display: block; font-style: normal; color: var(--dim); }
+  .tile:hover .cap b { background: var(--accent); color: var(--bg); }
+  footer { padding: 48px 16px 32px; color: var(--dim); }
+  footer p { margin: 0 0 4px; }
+  footer b { color: var(--fg); font-weight: normal; }
+  footer a { color: var(--accent); }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
 <body>
-<h1>Hello, GitHub Pages!</h1>
+<pre id="field" aria-hidden="true"></pre>
+<header>
+  <h1>verytired.net</h1>
+  <span>1 pieces · click to play live</span>
+</header>
+<main>
+<a class="tile" href="lab/2026-10-28_strobe/"><video src="lab/2026-10-28_strobe/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#001</b> 2026-10-28 <i>strobe</i> · load a photo<em>Turns a bundle of photos into a strobe-style video.</em></span></a>
+</main>
+<footer>
+  <p><b>veryTired</b></p>
+  <p>Developer, not Engineer. —— code / sound / image / notes. father.</p>
+  <p><a href="https://x.com/very_tired">X</a> / <a href="https://github.com/verytired">GitHub</a></p>
+</footer>
+<script>
+// 背景: 文字で描く干渉縞（ertdfgcvb 風）。動きを減らす設定なら止める
+const pre = document.getElementById('field'), chars = ' .·:-=+*#%@';
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let cols, rows;
+const resize = () => { cols = Math.ceil(innerWidth / 7.8); rows = Math.ceil(innerHeight / 13); };
+addEventListener('resize', resize); resize();
+const draw = t => {
+  let s = '';
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const v = Math.sin(x * .09 + t * .0007) + Math.sin(y * .17 - t * .0005) + Math.sin(Math.hypot(x - cols / 2, (y - rows / 2) * 2) * .12 - t * .001);
+      s += chars[Math.max(0, Math.min(chars.length - 1, Math.floor((v + 3) / 6 * chars.length)))];
+    }
+    s += '\n';
+  }
+  pre.textContent = s;
+  if (!still) requestAnimationFrame(draw);
+};
+requestAnimationFrame(draw);
+
+// 見えている動画だけ再生する
+const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? e.target.play().catch(() => {}) : e.target.pause()));
+document.querySelectorAll('video').forEach(v => io.observe(v));
+</script>
 </body>
 </html>
-< Rebuild trigger Tue Apr  1 23:25:56 JST 2025 -->

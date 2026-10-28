@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Strobe</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 280px; display: grid; gap: 6px; }
+  label { display: grid; grid-template-columns: 1fr 120px 40px; align-items: center; gap: 6px; }
+  h3 { margin: 10px 0 2px; font-size: 12px; color: #888; text-transform: uppercase; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <input type="file" id="files" accept="image/*" multiple>
+  <select id="aspect">
+    <option value="1080x1080">1:1</option>
+    <option value="1080x1920">9:16</option>
+    <option value="1920x1080">16:9</option>
+  </select>
+  <h3>Timing</h3>
+  <div id="timing"></div>
+  <h3>Effects</h3>
+  <div id="effects"></div>
+  <label>録画秒数 <input type="range" id="dur" min="3" max="30" value="10"><span></span></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<canvas id="c"></canvas>
+
+<script>
+// strobfy のリール設定を初期値に
+const P = {
+  interval: 70, doubleBlink: 40, whiteFlash: 20, blankShutter: 20,
+  jitter: 15, bw: 95, grain: 20, scan: 35, pixel: 15, slice: 15,
+};
+const defs = {
+  timing: [['interval', 'フレーム間隔 ms', 20, 300], ['doubleBlink', 'ダブルブリンク %'], ['whiteFlash', '白フラッシュ %'], ['blankShutter', 'ブランクシャッター %']],
+  effects: [['jitter', 'キネティックジッター %'], ['bw', '白黒コントラスト %'], ['grain', 'フィルムグレイン %'], ['scan', '走査線/VHS %'], ['pixel', 'ピクセレーション %'], ['slice', 'スライスグリッチ %']],
+};
+for (const [box, list] of Object.entries(defs)) for (const [k, name, min = 0, max = 100] of list) {
+  const l = document.createElement('label');
+  l.innerHTML = `${name} <input type="range" min="${min}" max="${max}" value="${P[k]}"><span>${P[k]}</span>`;
+  l.querySelector('input').oninput = e => { P[k] = +e.target.value; l.querySelector('span').textContent = P[k]; };
+  document.getElementById(box).append(l);
+}
+const durEl = document.getElementById('dur');
+durEl.oninput = () => durEl.nextElementSibling.textContent = durEl.value + 's';
+durEl.oninput();
+
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+const tmp = document.createElement('canvas'), tctx = tmp.getContext('2d');
+let imgs = [], W, H, grainTiles = [], scanTile;
+
+function setSize() {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  c.width = tmp.width = W; c.height = tmp.height = H;
+  // グレインは半解像度で4枚だけ作って使い回す
+  grainTiles = [0, 1, 2, 3].map(() => {
+    const g = document.createElement('canvas'); g.width = W / 2; g.height = H / 2;
+    const gx = g.getContext('2d'), d = gx.createImageData(g.width, g.height);
+    for (let i = 0; i < d.data.length; i += 4) { const v = Math.random() * 255; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+    gx.putImageData(d, 0, 0); return g;
+  });
+  scanTile = document.createElement('canvas'); scanTile.width = 1; scanTile.height = 4;
+  const sx = scanTile.getContext('2d'); sx.fillStyle = '#000'; sx.fillRect(0, 0, 1, 2);
+}
+document.getElementById('aspect').onchange = setSize;
+setSize();
+
+document.getElementById('files').onchange = async e => {
+  imgs = await Promise.all([...e.target.files].map(f => createImageBitmap(f)));
+};
+
+const hit = pct => Math.random() * 100 < pct;
+let queue = [];
+
+function drawPhoto(img, flash) {
+  ctx.save();
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  const j = P.jitter / 100;
+  ctx.translate(W / 2 + (Math.random() - .5) * W * .08 * j, H / 2 + (Math.random() - .5) * H * .08 * j);
+  ctx.rotate((Math.random() - .5) * .1 * j);
+  const s = Math.max(W / img.width, H / img.height) * (1 + Math.random() * .15 * j);
+  const b = P.bw / 100;
+  ctx.filter = `grayscale(${b ? 1 : 0}) contrast(${1 + b * 2})${flash ? ' brightness(2.2)' : ''}`; // 部分グレースケールだと色がcontrastで浮くので白黒は0/1
+  ctx.drawImage(img, -img.width * s / 2, -img.height * s / 2, img.width * s, img.height * s);
+  ctx.restore();
+
+  if (hit(P.pixel)) {
+    const k = 12 + Math.random() * 40;
+    tctx.imageSmoothingEnabled = false; ctx.imageSmoothingEnabled = false;
+    tctx.drawImage(c, 0, 0, W / k, H / k);
+    ctx.drawImage(tmp, 0, 0, W / k, H / k, 0, 0, W, H);
+    ctx.imageSmoothingEnabled = true;
+  }
+  if (hit(P.slice)) {
+    tctx.drawImage(c, 0, 0);
+    for (let y = 0; y < H;) {
+      const h = 8 + Math.random() * H * .08, dx = hit(50) ? (Math.random() - .5) * W * .2 : 0;
+      ctx.drawImage(tmp, 0, y, W, h, dx, y, W, h); y += h;
+    }
+  }
+  if (P.scan) {
+    const a = P.scan / 100;
+    ctx.globalAlpha = a * .6; ctx.fillStyle = ctx.createPattern(scanTile, 'repeat'); ctx.fillRect(0, 0, W, H);
+    // VHS: 横ズレの残像
+    ctx.globalAlpha = a * .35; ctx.globalCompositeOperation = 'screen';
+    ctx.drawImage(c, (Math.random() * 8 + 4) * a, 0);
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  }
+  if (P.grain) {
+    ctx.globalAlpha = P.grain / 100 * .5; ctx.globalCompositeOperation = 'overlay';
+    ctx.drawImage(grainTiles[Math.random() * 4 | 0], 0, 0, W, H);
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  }
+}
+const fill = col => { ctx.fillStyle = col; ctx.fillRect(0, 0, W, H); };
+
+// 音: フレームに同期。ドローンを黒フレームでゲートし、写真ごとにノイズのクリック。AudioContext はクリックで起動
+let ac, out, noise, drone, audioDest, n = 0;
+addEventListener('pointerdown', () => {
+  if (ac) return;
+  ac = new AudioContext(); out = ac.createGain(); out.gain.value = .6;
+  out.connect(ac.destination); out.connect(audioDest = ac.createMediaStreamDestination());
+  noise = ac.createBuffer(1, ac.sampleRate * .5, ac.sampleRate);
+  noise.getChannelData(0).forEach((_, i, d) => d[i] = Math.random() * 2 - 1);
+  // 低いデチューンsaw + LFOで開閉するローパス
+  drone = ac.createGain(); drone.gain.value = 0;
+  const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 260; lp.Q.value = 6;
+  const lfo = ac.createOscillator(), depth = ac.createGain(); lfo.frequency.value = .13; depth.gain.value = 180;
+  lfo.connect(depth).connect(lp.frequency); lfo.start();
+  for (const f of [41.2, 41.5, 82.6]) { const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.connect(lp); o.start(); }
+  lp.connect(drone).connect(out);
+});
+function hitSound(src, t, len, vol, type, freq) {
+  const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq;
+  const g = ac.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.001, t + len);
+  src.connect(f).connect(g).connect(out); src.start(t, Math.random() * .4); src.stop(t + len);
+  return f;
+}
+const noiseSrc = () => { const b = ac.createBufferSource(); b.buffer = noise; return b; };
+function sound(step) {
+  if (!ac) return;
+  const t = ac.currentTime;
+  drone.gain.setTargetAtTime(step === 'black' ? 0 : .22, t, .004);
+  if (n++ % 8 === 0) { // キック
+    const o = ac.createOscillator(); o.frequency.setValueAtTime(110, t); o.frequency.exponentialRampToValueAtTime(38, t + .12);
+    hitSound(o, t, .35, .9, 'lowpass', 400);
+  }
+  if (step.flash) hitSound(noiseSrc(), t, .18, .45, 'lowpass', 2500).frequency.exponentialRampToValueAtTime(150, t + .18);
+  else if (step !== 'black') hitSound(noiseSrc(), t, .015 + Math.random() * .02, .35, 'bandpass', 5000 + Math.random() * 5000);
+}
+
+function tick() {
+  setTimeout(tick, P.interval);
+  if (!imgs.length) return fill('#000');
+  if (!queue.length) {
+    const img = imgs[Math.random() * imgs.length | 0];
+    if (hit(P.whiteFlash)) queue.push({ img, flash: true }); // 真っ白にせず写真を飛ばす
+    else if (hit(P.blankShutter)) queue.push('black');
+    else queue.push(img, ...(hit(P.doubleBlink) ? ['black', img] : []));
+  }
+  const step = queue.shift();
+  step === 'black' ? fill('#000') : step.flash ? drawPhoto(step.img, true) : drawPhoto(step);
+  sound(step);
+}
+tick();
+
+document.getElementById('rec').onclick = e => {
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest?.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 12e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(window.lastBlob = new Blob(chunks, { type }));
+    a.download = `strobe_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), durEl.value * 1000);
+};
+</script>
+</body>
+</html>

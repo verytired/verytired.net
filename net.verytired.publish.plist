@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>net.verytired.publish</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>/Users/yutaka/Workspace/verytired_net/publish.sh</string>
+  </array>
+  <!-- 日付が変わった直後に出す。スリープ中なら復帰時に1回走る -->
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>5</integer></dict>
+  <key>StandardOutPath</key><string>/tmp/verytired-net-publish.log</string>
+  <key>StandardErrorPath</key><string>/tmp/verytired-net-publish.log</string>
+</dict>
+</plist>
