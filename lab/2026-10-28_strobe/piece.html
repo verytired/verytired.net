@@ -27,6 +27,7 @@
   <div id="effects"></div>
   <label>録画秒数 <input type="range" id="dur" min="3" max="30" value="10"><span></span></label>
   <button id="rec">● 録画して保存</button>
+  <button id="play" hidden onclick="window.dispatchEvent(new Event('pointerdown'))"></button><!-- 外側のプレイヤーから音を始める入口 -->
 </div>
 <canvas id="c"></canvas>
 
@@ -161,7 +162,7 @@ function sound(step) {
 
 function tick() {
   setTimeout(tick, P.interval);
-  if (!imgs.length) return fill('#000');
+  if (!imgs.length || ac?.state !== 'running') return fill('#000'); // 音が鳴るまで（再生ボタン・クリックまで）は止めておく
   if (!queue.length) {
     const img = imgs[Math.random() * imgs.length | 0];
     if (hit(P.whiteFlash)) queue.push({ img, flash: true }); // 真っ白にせず写真を飛ばす
