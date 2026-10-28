@@ -74,6 +74,11 @@ document.getElementById('files').onchange = async e => {
   imgs = await Promise.all([...e.target.files].map(f => createImageBitmap(f)));
 };
 
+// 写真が選ばれるまでは picsum のフリー画像で動かす（届いた順に足す）
+for (let i = 0; i < 10; i++)
+  fetch(`https://picsum.photos/seed/strobe${i}/1200/1200`).then(r => r.blob()).then(createImageBitmap)
+    .then(b => { if (!document.getElementById('files').files.length) imgs.push(b); }).catch(() => {});
+
 const hit = pct => Math.random() * 100 < pct;
 let queue = [];
 
