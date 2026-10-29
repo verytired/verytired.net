@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Glitter EXE</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik+Mono+One&family=Black+Han+Sans&display=swap">
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <label>偽色の強さ <input type="range" id="fc" min="0" max="1" step="0.05" value="1"></label>
+  <label><input type="checkbox" id="type" checked> 大きな文字</label>
+  <label><input type="checkbox" id="stickers" checked> ステッカー</label>
+  <div id="msg"></div>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="90" value="60"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<canvas id="c"></canvas>
+
+<script>
+// 存在しない hyperpop 寄りの K-POP グループ「LOLLIBYTE（롤리바이트）」の嘘の MV「glitter.exe」。素材の動画を2小節ごとに切り替え、
+// 一人だけ切り抜いて増やすコピー、偽色、1文字ずつ跳ねる文字、病みかわいいステッカー、デジタルのグリッチを、hyperpop とハードコアの間の曲に合わせてかける
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+const grab = document.createElement('canvas'), gr = grab.getContext('2d', { willReadFrequently: true });   // 偽色にするコマ（1/3 の大きさ）
+const trail = document.createElement('canvas'), tctx = trail.getContext('2d');   // 残像：前のコマの写し
+const $ = id => document.getElementById(id), msg = $('msg');
+const vids = ['park', 'street', 'rooftop', 'selfie'].map(n => Object.assign(document.createElement('video'), { src: `src/${n}_v1.mp4`, muted: true, loop: true, playsInline: true }));
+vids.forEach(v => { v.onloadeddata = () => v.play(); });
+let video = vids[0], W, H, LW, LH;
+const setSize = () => {
+  [W, H] = $('aspect').value.split('x').map(Number);
+  c.width = W; c.height = H; trail.width = W / 2; trail.height = H / 2;
+  LW = W / 3 | 0; LH = H / 3 | 0; grab.width = LW; grab.height = LH;
+};
+
+// --- 偽色 ---
+// 明るさ（0..255）を、暗い順に並べた色の段に置き換える。段のあいだはなめらかにつなぐ
+const PALETTES = [
+  ['#0a1a6e', '#00e5ff', '#e8ffff', '#ff2a2a'],   // シアンと赤
+  ['#2a0a6e', '#3a5bff', '#ffb300', '#ffe9a0'],   // 青とオレンジ（熱の写真）
+  ['#00a83a', '#ff3ad8', '#ff8cf0', '#fff0fb'],   // マゼンタと緑
+  ['#3b0aa8', '#a8ff00', '#f6ff9a', '#ffffff'],   // 紫とライム
+];
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+const LUTS = PALETTES.map(p => {
+  const cs = p.map(hex), lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const f = i / 255 * (cs.length - 1), k = Math.min(cs.length - 2, f | 0), u = f - k;
+    for (let ch = 0; ch < 3; ch++) lut[i * 3 + ch] = cs[k][ch] * (1 - u) + cs[k + 1][ch] * u;
+  }
+  return lut;
+});
+// 動画の今のコマを画面いっぱいに切り抜き（z 倍に寄る）、偽色を amt だけ混ぜる。明るさは少し段に丸めてベタっとさせる。
+// そのあと R を右、B を左へ split マスずらす（RGB のずれ）
+let copyBuf = new Uint8ClampedArray(0);
+function sample(z, amt, pal, split) {
+  if (video.readyState < 2) return false;
+  track();   // 人を検出して仮想のカメラを動かす
+  const vw = video.videoWidth, vh = video.videoHeight, s0 = Math.max(LW / vw, LH / vh), zz = cam.z * z;
+  crop.w = LW / s0 / zz; crop.h = LH / s0 / zz;
+  crop.x = Math.min(vw - crop.w, Math.max(0, cam.x - crop.w / 2)); crop.y = Math.min(vh - crop.h, Math.max(0, cam.y - crop.h / 2));
+  gr.drawImage(video, crop.x, crop.y, crop.w, crop.h, 0, 0, LW, LH);
+  if (amt <= 0 && split < 1) return true;
+  let im;
+  try { im = gr.getImageData(0, 0, LW, LH); } catch (e) { msg.textContent = 'file:// では動画の画素を読めないので、ローカルサーバーで開いてください'; return false; }
+  const d = im.data, lut = LUTS[pal];
+  if (amt > 0) for (let i = 0; i < d.length; i += 4) {
+    const l = ((d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11) >> 4 << 4) + 8;   // 16段に丸める
+    const q = Math.min(255, l) * 3;
+    d[i] += (lut[q] - d[i]) * amt; d[i + 1] += (lut[q + 1] - d[i + 1]) * amt; d[i + 2] += (lut[q + 2] - d[i + 2]) * amt;
+  }
+  const sp = Math.round(split);
+  if (sp >= 1) {
+    if (copyBuf.length !== d.length) copyBuf = new Uint8ClampedArray(d.length);
+    copyBuf.set(d);
+    for (let y = 0; y < LH; y++) for (let x = 0; x < LW; x++) {
+      const i = (y * LW + x) * 4;
+      d[i] = copyBuf[(y * LW + Math.max(0, x - sp)) * 4]; d[i + 2] = copyBuf[(y * LW + Math.min(LW - 1, x + sp)) * 4 + 2];
+    }
+  }
+  gr.putImageData(im, 0, 0);
+  return true;
+}
+
+// --- 人の検出とカメラ ---
+// 2026-11-06 ghostidol と同じ。MediaPipe の PoseLandmarker で最大5人の骨格と、一人ずつの切り抜き（マスク）を毎フレーム取る。左から順に並べてメンバーに当てる。
+// 動画の中を切り抜いて動かす仮想のカメラで、引き（全員が真ん中に収まる）と、選んだ一人の顔と肩のアップを切り替える
+const det = document.createElement('canvas'), dctx = det.getContext('2d');      // 検出に渡す縮めたコマ（横 360px）
+const maskC = document.createElement('canvas'), mkctx = maskC.getContext('2d');
+const RING = 32, ring = Array.from({ length: RING }, () => document.createElement('canvas'));   // 切り抜きの直近32コマ（時間をずらしたコピーに使う）
+let pose = null, people = [], ringI = 0, detN = 0, hasCut = false, maskImg = null;
+const cam = { x: 0, y: 0, z: 1 }, camT = { x: 0, y: 0, z: 1 }, crop = { x: 0, y: 0, w: 1, h: 1 };
+let focus = 0, closeUp = false, snap = true, push = 0, camRate = 1, lastTrack = 0;
+const TV = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+import(TV).then(async ({ PoseLandmarker, FilesetResolver }) => {
+  const fs = await FilesetResolver.forVisionTasks(TV + '/wasm');
+  pose = await PoseLandmarker.createFromOptions(fs, {
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task', delegate: 'GPU' },
+    runningMode: 'VIDEO', numPoses: 5, outputSegmentationMasks: true,
+  });
+}).catch(e => { msg.textContent = '人の検出を読み込めませんでした: ' + e.message; });
+function track() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (pose && detN++ % 2 === 0) {   // 検出は重いので1コマおき
+    if (det.width !== 360) { det.width = 360; det.height = Math.round(360 * vh / vw); }
+    dctx.drawImage(video, 0, 0, det.width, det.height);
+    const r = pose.detectForVideo(det, performance.now());
+    // 腰の真ん中の x で左から並べる
+    const ps = r.landmarks.map((lm, i) => ({ lm, i, x: (lm[23].x + lm[24].x) / 2 })).sort((a, b) => a.x - b.x);
+    people = ps.map(p => {
+      const xs = p.lm.map(q => Math.min(1, Math.max(0, q.x))), ys = p.lm.map(q => Math.min(1, Math.max(0, q.y)));
+      return { ...p, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+    });
+    const f = people.length ? people[focus % people.length] : null;
+    if (f && r.segmentationMasks) cutout(r.segmentationMasks[f.i]); else hasCut = false;
+    r.segmentationMasks?.forEach(m => m.close());
+  }
+  aim(vw, vh);
+  if (snap) { Object.assign(cam, camT); snap = false; }   // 小節の頭はカット（一気に切り替える）
+  else {   // 切り替えのあいだはなめらかに追う。追う速さ（camRate、1秒あたり）は区間で替え、緩急をつける
+    const tn = performance.now() / 1000, a = 1 - Math.exp(-(tn - lastTrack) * camRate);
+    for (const k of ['x', 'y', 'z']) cam[k] += (camT[k] - cam[k]) * a;
+  }
+  lastTrack = performance.now() / 1000;
+}
+// カメラの狙い。引きは全員の外枠が収まるように、アップは顔と肩の中心に、肩幅が画面の 1/3 ほどになるまで寄る。
+// どちらも小節の中でゆっくり寄っていき（push）、ドロップの小節は引く
+function aim(vw, vh) {
+  const baseW = vw / Math.max(1, (vw / vh) / (W / H));   // 寄っていないときに切り抜く幅（動画の画素）
+  const zoomPush = 1 + push * 0.25;
+  const f = people.length ? people[focus % people.length] : null;
+  if (closeUp && f) {
+    const L = f.lm, sw = Math.max(0.03, Math.abs(L[11].x - L[12].x)) * vw;
+    camT.x = (L[0].x + (L[11].x + L[12].x) / 2) / 2 * vw; camT.y = (L[0].y * 0.6 + (L[11].y + L[12].y) / 2 * 0.4) * vh;
+    camT.z = Math.min(4, Math.max(1.3, baseW / (sw * 3))) * zoomPush;
+  } else if (people.length) {
+    const x0 = Math.min(...people.map(p => p.x0)), x1 = Math.max(...people.map(p => p.x1)), y0 = Math.min(...people.map(p => p.y0)), y1 = Math.max(...people.map(p => p.y1));
+    camT.x = (x0 + x1) / 2 * vw; camT.y = (y0 + y1) / 2 * vh;
+    camT.z = Math.min(1.6, Math.max(1, Math.min(baseW / ((x1 - x0) * vw * 1.3), vh / ((y1 - y0) * vh * 1.2)))) * zoomPush;
+  } else { camT.x = vw / 2; camT.y = vh / 2; camT.z = zoomPush; }
+}
+// 選んだ一人の切り抜き：検出に使ったコマにマスクを掛け、輪（ring）に入れる
+function cutout(m) {
+  const a = m.getAsFloat32Array();
+  if (!maskImg || maskImg.width !== m.width) { maskImg = new ImageData(m.width, m.height); maskC.width = m.width; maskC.height = m.height; }
+  for (let i = 0; i < a.length; i++) maskImg.data[i * 4 + 3] = a[i] * 255;
+  mkctx.putImageData(maskImg, 0, 0);
+  const h = ring[ringI++ % RING], hc = h.getContext('2d');
+  if (h.width !== det.width) { h.width = det.width; h.height = det.height; }
+  hc.globalCompositeOperation = 'copy'; hc.drawImage(det, 0, 0);
+  hc.globalCompositeOperation = 'destination-in'; hc.drawImage(maskC, 0, 0, det.width, det.height);
+  hc.globalCompositeOperation = 'source-over';
+  hasCut = true;
+}
+
+// --- 人のコピー（ghostidol の発展型） ---
+// 選んだメンバーの切り抜きを、4小節ごとに4つのやり方で増やす。切り抜きの輪（直近32コマ）から、時間をずらしたものも使う
+//   0 カノン：画面の奥に2列の隊形で並べ、1体ずつ数コマ遅らせる。振り付けが波のように伝わる
+//   1 巨人：大きく色を変えたコピーをその人の後ろに立たせ、本人をその前に描き直す
+//   2 シール：その人を白い縁付きのシールにして、画面に4枚散らす。キックで貼り直す
+//   3 時間の尾：数コマ前のコピーを横に並べて、動きをコマ撮りのように残す
+// ラスサビはスネアで、コピーがその人を中心に輪になって飛び散る（burst）
+let burstT = -9, spots = [];
+const newSpots = () => { spots = Array.from({ length: 4 }, (_, i) => ({ x: W * (0.15 + (i % 2) * 0.6 + Math.random() * 0.1), y: H * (0.25 + (i >> 1) * 0.4 + Math.random() * 0.1), sc: 0.35 + Math.random() * 0.2 })); };
+function personCopies(kind, t) {
+  if (!hasCut || !people.length) return;
+  const k0 = det.width / video.videoWidth, sx = crop.x * k0, sy = crop.y * k0, sw = crop.w * k0, sh = crop.h * k0;
+  const f = people[focus % people.length];
+  const px = (((f.x0 + f.x1) / 2) * det.width - sx) / sw * W, fy = ((f.y1 * det.height) - sy) / sh * H;   // 画面の上のその人の中心の x と足もと
+  const at = d => ring[(ringI - 1 - d + RING * 1000) % RING];   // d コマ前の切り抜き
+  // 切り抜きを、足もと（px, fy）を基準に sc 倍して (dx, dy) ずらして描く
+  const draw = (cv, dx, dy, sc, alpha, filter = 'none') => {
+    ctx.globalAlpha = alpha; ctx.filter = filter;
+    ctx.drawImage(cv, sx, sy, sw, sh, px * (1 - sc) + dx, fy * (1 - sc) + dy, W * sc, H * sc);
+  };
+  ctx.save();
+  if (kind === 0) {
+    const rows = [{ n: 5, sc: 0.42, dy: -H * 0.2 }, { n: 4, sc: 0.6, dy: -H * 0.1 }];
+    rows.forEach((r, ri) => { for (let j = 0; j < r.n; j++) {
+      const x = W * (j + 0.5) / r.n, d = (ri * 5 + j) * 2;
+      draw(at(d), x - px, r.dy, r.sc, 0.95, `hue-rotate(${ri * 120 + j * 25}deg) saturate(1.8)`);
+    } });
+  } else if (kind === 1) {
+    draw(at(6), 0, 0, 2.3 + kick * 0.15, 0.9, 'hue-rotate(180deg) saturate(3) contrast(1.6) brightness(1.1)');   // 少し遅れて動く大きな影
+    draw(at(0), 0, 0, 1, 1);
+  } else if (kind === 2) {
+    if (!spots.length) newSpots();
+    for (const p of spots) {
+      const dx = p.x - px, dy = p.y - fy;
+      for (let k = 0; k < 8; k++) draw(at(0), dx + Math.cos(k * Math.PI / 4) * 7, dy + Math.sin(k * Math.PI / 4) * 7, p.sc, 1, 'brightness(0) invert(1)');   // 白い縁
+      draw(at(0), dx, dy, p.sc, 1, 'saturate(1.6) contrast(1.1)');
+    }
+  } else {
+    const dir = px < W / 2 ? 1 : -1;
+    for (let k = 7; k >= 1; k--) draw(at(k * 3), dir * k * W * 0.11, 0, 1 - k * 0.04, 0.95 - k * 0.08, `hue-rotate(${k * 40}deg) saturate(2)`);
+    draw(at(0), 0, 0, 1, 1);
+  }
+  const age = (t - burstT) / (ST * 6);   // 飛び散り
+  if (age >= 0 && age < 1) for (let k = 0; k < 8; k++) {
+    const a = k / 8 * Math.PI * 2, r = W * 0.45 * age;   // 回さず、まっすぐ外へ
+    draw(at(k), Math.cos(a) * r, Math.sin(a) * r * 0.7, 0.6 - age * 0.3, 1 - age, `hue-rotate(${k * 45}deg)`);
+  }
+  ctx.restore();
+}
+
+const melt = document.createElement('canvas'), mctx = melt.getContext('2d');     // 溶かしたコマ
+// --- 溶かす（ghostidol と同じ） ---
+// grab を 2px の横の帯に切り、帯ごとに左右へずらし横に伸ばす。ずれは画面の真ん中（顔のあたり）ほど大きく、波は下へ流れる。
+// Weirdcore が Aphex Twin の映像でやる、顔が液体のように崩れる感じ
+function meltFrame(amt, t) {
+  if (melt.width !== LW || melt.height !== LH) { melt.width = LW; melt.height = LH; }
+  mctx.drawImage(grab, 0, 0);
+  if (amt <= 0.01) return;
+  for (let y = 0; y < LH; y += 2) {
+    const v = y / LH - 0.4, bump = Math.exp(-v * v * 12);
+    const dx = Math.sin(y * 0.05 - t * 9) * amt * LW * 0.12 * bump, sw = 1 + amt * 0.3 * bump;
+    mctx.drawImage(grab, 0, y, LW, 2, (LW - LW * sw) / 2 + dx, y, LW * sw, 2);
+  }
+}
+// --- データモッシュ（ghostidol と同じ） ---
+// 新しいコマを描かず、前のコマ（trail）を 48px のブロックごとにずらして写し直す。新しいコマはうっすらにじませる
+let moshSeed = 0;
+function mosh() {
+  const B = 48 * W / 1080;
+  for (let by = 0; by < H; by += B) for (let bx = 0; bx < W; bx += B) {
+    const a = Math.sin(bx * 0.004 + moshSeed) + Math.cos(by * 0.003 - moshSeed * 1.3);
+    if (Math.abs(a) < 0.5) continue;
+    const fx = Math.sin(by * 0.01 + moshSeed * 2) * B * 0.25 * a, fy = Math.cos(bx * 0.01 + moshSeed) * B * 0.15 * a;   // 渦に見えないよう、ずれは小さめ
+    ctx.drawImage(trail, (bx - fx) / 2, (by - fy) / 2, B / 2, B / 2, bx, by, B, B);
+  }
+  ctx.globalAlpha = 0.12; ctx.drawImage(grab, 0, 0, W, H); ctx.globalAlpha = 1;
+  // 生の映像の窓：崩れた画面の中に、四角く切り抜いた今のコマを開ける。キックで場所が替わる
+  if (win) { const [x, y, w, h] = win; ctx.drawImage(grab, x / 3, y / 3, w / 3, h / 3, x, y, w, h); }
+}
+let win = null;
+
+// --- 文字 ---
+// 1文字ずつ色を替え、太い白の縁を付けて、16分ごとに1文字ずつ跳ねさせる。出た瞬間はぽんと大きく
+const WORDS = ['LOLLI', 'BYTE', '반짝반짝', '말랑말랑', 'glitter.exe', '♡♡♡'];
+const NEON = ['#ff2bd6', '#00f0ff', '#b6ff00', '#ffe600', '#ff5a1f', '#8a5cff'];
+function bounceWord(s, cy, size, t0, t) {
+  const chars = [...s], hangul = /[가-힣]/.test(s);
+  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+  ctx.font = `${size}px ${hangul ? '"Black Han Sans"' : '"Rubik Mono One"'}, sans-serif`;
+  const ws = chars.map(ch => ctx.measureText(ch).width), total = ws.reduce((a, b) => a + b, 0);
+  const k = Math.min(1, W * 0.92 / total), age = t - t0, pop = age < 0.08 ? 0.5 + age / 0.08 * 0.6 : 1.1 - Math.min(0.1, age);
+  const hop = Math.floor((t - t0) / ST);   // 今跳ねている文字
+  ctx.translate(W / 2, cy); ctx.scale(k * pop, k * pop);
+  let x = -total / 2;
+  chars.forEach((ch, i) => {
+    const up = i === hop % chars.length ? -size * 0.25 : 0, rot = Math.sin(t * 9 + i * 1.7) * 0.12;
+    ctx.save(); ctx.translate(x + ws[i] / 2, up + Math.sin(t * 5 + i) * size * 0.05); ctx.rotate(rot);
+    ctx.lineWidth = size * 0.16; ctx.strokeStyle = '#fff'; ctx.strokeText(ch, 0, 0);
+    ctx.fillStyle = NEON[(i + Math.floor(t0 / ST)) % NEON.length]; ctx.fillText(ch, 0, 0);
+    ctx.restore(); x += ws[i];
+  });
+  ctx.restore();
+}
+
+// --- ステッカー ---
+// 病みかわいい（グロかわいい）ステッカー。色のついた絵文字に、白い縁（ダイカットのシール）と影を付ける。縁は絵文字を周りにずらして何度も描き、白で塗って作る。
+// 貼られたあとは横の帯ごとに揺れて溶けていき、キックで脈打つ。目玉が出ると、周りに小さな目玉が群がる
+const EMOJI = ['👁️', '🫀', '🦷', '💀', '🧠', '🪱', '🕷️', '🦴', '💊', '🩹', '👅', '🩸', '🐛', '🍭'];
+const sil = EMOJI.map(e => {
+  const s = document.createElement('canvas'), g = s.getContext('2d'), o = document.createElement('canvas'), og = o.getContext('2d');
+  s.width = s.height = o.width = o.height = 320;
+  for (const cv of [g, og]) { cv.font = '200px "Apple Color Emoji", "Noto Color Emoji", sans-serif'; cv.textAlign = 'center'; cv.textBaseline = 'middle'; }
+  for (let a = 0; a < 16; a++) og.fillText(e, 160 + Math.cos(a / 16 * Math.PI * 2) * 16, 170 + Math.sin(a / 16 * Math.PI * 2) * 16);
+  og.globalCompositeOperation = 'source-in'; og.fillStyle = '#fff'; og.fillRect(0, 0, 320, 320);
+  g.shadowColor = 'rgba(0,0,0,0.35)'; g.shadowOffsetX = 6; g.shadowOffsetY = 10; g.shadowBlur = 8; g.drawImage(o, 0, 0);
+  g.shadowColor = 'transparent'; g.fillText(e, 160, 170);
+  return s;
+});
+const stickers = [];
+function popSticker() {
+  const left = Math.random() < 0.5, size = W * (0.28 + Math.random() * 0.22);
+  const i = Math.random() * EMOJI.length | 0, x = left ? W * (0.05 + Math.random() * 0.25) : W * (0.7 + Math.random() * 0.25), y = H * (0.15 + Math.random() * 0.7), t0 = now();
+  stickers.push({ i, x, y, size, rot: (Math.random() - 0.5) * 0.8, t0, life: ST * (6 + Math.random() * 10) });
+  if (i === 0) for (let k = 0; k < 6; k++) {   // 目玉の群れ
+    const a = Math.random() * Math.PI * 2, r = size * (0.45 + Math.random() * 0.4);
+    stickers.push({ i: 0, x: x + Math.cos(a) * r, y: y + Math.sin(a) * r, size: size * (0.2 + Math.random() * 0.25), rot: (Math.random() - 0.5) * 1.5, t0: t0 + k * ST * 0.5, life: ST * 10 });
+  }
+  while (stickers.length > 14) stickers.shift();
+}
+function drawStickers(t) {
+  for (let i = stickers.length - 1; i >= 0; i--) {
+    const s = stickers[i], age = (t - s.t0) / s.life;
+    if (age > 1) { stickers.splice(i, 1); continue; }
+    if (age < 0) continue;   // 群れの目玉は少しずつ遅れて出る
+    const pop = age < 0.08 ? 0.6 + age / 0.08 * 0.55 : 1.15 - Math.min(0.15, (age - 0.08) * 2);   // ぽんと大きく出て少し戻る
+    ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.rot + Math.sin(t * 6 + i) * 0.06); const z = s.size * pop * (1 + kick * 0.12);
+    // 溶ける：8px の帯ごとに左右へ揺らす。貼られてからの時間で大きくなる
+    const amp = (0.02 + age * 0.14) * z, img = sil[s.i];
+    for (let y = 0; y < 320; y += 8) ctx.drawImage(img, 0, y, 320, 8, -z / 2 + Math.sin(y * 0.06 - t * 7 + i) * amp * (y / 320), -z / 2 + y / 320 * z, z, z * 8 / 320 + 1);
+    ctx.restore();
+  }
+}
+
+// --- 音 ---
+// 160BPM の hyperpop とハードコアの間。強く歪ませた長いキック（サビは四つ打ち）、歪ませた 808（音程をすべらせる）、
+// ビットクラッシュしたスネア、16分とロールのハット、歪ませた7本のノコギリ波のスーパーソウの和音（キックで沈める）、
+// ノコギリ波を声の帯域に通したボーカルチョップ風のリード。全体を最後に強くクリップさせる。
+// 構成は40小節（60秒）：前奏4・A メロ8・サビ8・ブレイク4・サビ8・ラスサビ8
+const BPM = 160, ST = 60 / BPM / 4, events = [];
+let step = 0, ac, out, audioDest, duck, kbus, crushBus, echo, noiseBuf;
+const now = () => ac ? ac.currentTime : performance.now() / 1000;
+const mtof = m => 440 * 2 ** ((m - 69) / 12);
+const shaper = (drive) => { const s = ac.createWaveShaper(); s.curve = Float32Array.from({ length: 2048 }, (_, i) => Math.tanh((i / 1023.5 - 1) * drive) / Math.tanh(drive)); return s; };
+const crusher = (bits) => { const s = ac.createWaveShaper(), n = 2 ** bits; s.curve = Float32Array.from({ length: 4096 }, (_, i) => Math.round((i / 2047.5 - 1) * n) / n); return s; };
+const section = b => { b %= 40; return b < 4 ? 'intro' : b < 12 ? 'verse' : b < 20 ? 'chorus' : b < 24 ? 'break' : b < 32 ? 'chorus' : 'last'; };
+function startAudio() {
+  if (ac) return ac.resume();
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -10; comp.ratio.value = 6; comp.attack.value = 0.002;
+  out = ac.createGain(); out.gain.value = 0.42;
+  out.connect(shaper(2.6)).connect(comp);
+  comp.connect(ac.destination); comp.connect(audioDest = ac.createMediaStreamDestination());
+  duck = ac.createGain(); duck.connect(shaper(3)).connect(out);   // キックで沈める上モノ（歪ませる）
+  kbus = ac.createGain(); const kl = ac.createBiquadFilter(); kl.type = 'lowpass'; kl.frequency.value = 7000; kbus.connect(shaper(16)).connect(kl).connect(out);   // キック：強く歪ませる
+  crushBus = ac.createGain(); crushBus.connect(crusher(4)).connect(shaper(4)).connect(out);   // ビットクラッシュに送る
+  echo = ac.createDelay(1); echo.delayTime.value = ST * 3;
+  const fb = ac.createGain(), ef = ac.createBiquadFilter(); fb.gain.value = 0.3; ef.type = 'highpass'; ef.frequency.value = 600;
+  echo.connect(ef).connect(fb).connect(echo); ef.connect(duck);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  let next = ac.currentTime + 0.1;
+  setInterval(() => { while (next < ac.currentTime + 0.2) { play(step++, next); next += ST; } }, 25);
+}
+const noise = () => { const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true; s.loopStart = Math.random(); return s; };
+function kickAt(t) {
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(380, t); o.frequency.exponentialRampToValueAtTime(58, t + 0.04); o.frequency.exponentialRampToValueAtTime(44, t + 0.28);
+  g.gain.setValueAtTime(0.8, t); g.gain.setValueAtTime(0.8, t + 0.14); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.3);
+  o.connect(g).connect(kbus); o.start(t); o.stop(t + 0.32);
+  duck.gain.cancelScheduledValues(t); duck.gain.setValueAtTime(0.25, t); duck.gain.linearRampToValueAtTime(1, t + ST * 2.5);
+}
+// 808：サイン波を強く歪ませる。glide があれば前の音からすべって入る
+let last808 = 40;
+function bassAt(t, midi, len, glide) {
+  const o = ac.createOscillator(), g = ac.createGain(), sh = shaper(10), lp = ac.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = 1800;
+  o.frequency.setValueAtTime(mtof(glide ? last808 : midi), t); if (glide) o.frequency.exponentialRampToValueAtTime(mtof(midi), t + 0.12);
+  g.gain.setValueAtTime(0.4, t); g.gain.setValueAtTime(0.4, t + len * 0.8); g.gain.linearRampToValueAtTime(0, t + len);
+  o.connect(sh).connect(lp).connect(g).connect(out); o.start(t); o.stop(t + len + 0.02);
+  last808 = midi;
+}
+function hit(t, type, freq, q, v, len, dest = out) {
+  const n = noise(), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = type; f.frequency.value = freq; f.Q.value = q;
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(1e-4, t + len);
+  n.connect(f).connect(g).connect(dest); n.start(t); n.stop(t + len + 0.02);
+}
+function snareAt(t) {
+  hit(t, 'bandpass', 2200, 0.8, 0.9, 0.16, crushBus); hit(t, 'highpass', 5000, 0.7, 0.3, 0.08);
+  const o = ac.createOscillator(), g = ac.createGain(); o.type = 'triangle'; o.frequency.setValueAtTime(330, t); o.frequency.exponentialRampToValueAtTime(180, t + 0.05);
+  g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.08); o.connect(g).connect(crushBus); o.start(t); o.stop(t + 0.1);
+}
+// スーパーソウ：1音につきノコギリ波7本を少しずつずらす
+function chordAt(t, notes, len, bright) {
+  const f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'lowpass'; f.frequency.value = bright ? 7000 : 1600; f.Q.value = 0.7;
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.022, t + 0.02); g.gain.setValueAtTime(0.022, t + len - 0.05); g.gain.linearRampToValueAtTime(0, t + len);
+  f.connect(g).connect(duck);
+  for (const m of notes) for (let k = -3; k <= 3; k++) {
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(m); o.detune.value = k * 11;
+    o.connect(f); o.start(t); o.stop(t + len + 0.02);
+  }
+}
+// ボーカルチョップ風：ノコギリ波を2つの声の帯域（フォルマント）に通し、ビブラートをかけ、音の頭でしゃくり上げる
+const VOWELS = [[800, 1200], [350, 2300], [500, 900], [300, 2600]];   // あ・い・お・え（を高い声にずらす）
+function chopAt(t, midi, len) {
+  const o = ac.createOscillator(), g = ac.createGain(), vib = ac.createOscillator(), vg = ac.createGain(), [f1, f2] = VOWELS[Math.random() * 4 | 0];
+  o.type = 'sawtooth'; o.frequency.setValueAtTime(mtof(midi - 2), t); o.frequency.exponentialRampToValueAtTime(mtof(midi), t + 0.04);
+  vib.frequency.value = 6.5; vg.gain.value = mtof(midi) * 0.012; vib.connect(vg).connect(o.frequency);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.5, t + 0.01); g.gain.setValueAtTime(0.5, t + len * 0.7); g.gain.linearRampToValueAtTime(0, t + len);
+  for (const [fq, v] of [[f1 * 1.6, 1], [f2 * 1.4, 0.6]]) { const b = ac.createBiquadFilter(), bg = ac.createGain(); b.type = 'bandpass'; b.frequency.value = fq; b.Q.value = 9; bg.gain.value = v; o.connect(b).connect(bg).connect(g); }
+  g.connect(duck); g.connect(echo);
+  o.start(t); vib.start(t); o.stop(t + len + 0.02); vib.stop(t + len + 0.02);
+}
+// E メジャー：E B C#m A。808 は根音、リードは2小節の型
+const CH = [[64, 68, 71, 75], [63, 66, 71, 75], [61, 64, 68, 73], [61, 64, 69, 73]], ROOT = [40, 35, 37, 33];
+const HOOK = [83, -1, 80, 83, -1, 85, 83, 80, 78, -1, 76, -1, 78, 80, -1, -1, 83, -1, 80, 83, -1, 87, 85, 83, 80, -1, 78, 76, -1, 75, 76, -1];
+function play(step, t) {
+  const bar = Math.floor(step / 16), s = step % 16, sec = section(bar), k = bar % 4, big = sec === 'chorus' || sec === 'last';
+  if (s === 0) events.push({ t, type: 'bar', bar, sec });
+  if (s === 0 || (big && s === 8)) chordAt(t, CH[k], ST * (big ? 8 : 16), big);
+  if (sec !== 'intro' && sec !== 'break') {
+    // サビは四つ打ち（ラスサビは小節の終わりを16分で連打）、A メロは跳ねた型
+    const kk = big ? s % 4 === 0 || (sec === 'last' && bar % 2 === 1 && s >= 13) : s === 0 || s === 6 || s === 10;
+    if (kk) { kickAt(t); events.push({ t, type: 'kick', s }); }
+    if (s === 4 || s === 12) { snareAt(t); events.push({ t, type: 'snare' }); }
+    if (!big) { if (s === 0) bassAt(t, ROOT[k], ST * 6, false); if (s === 6) bassAt(t, ROOT[k] + 12, ST * 4, true); if (s === 10) bassAt(t, ROOT[k], ST * 6, true); }
+    else if (s % 4 === 2) bassAt(t, ROOT[k] + (s === 14 ? 12 : 0), ST * 2, s === 14);   // サビの 808 は裏で刻む（キックとぶつけない）
+  }
+  // ハット：16分。小節の最後の拍は32分のロール
+  if (sec !== 'intro') {
+    if (s >= 12 && bar % 2 === 1) { for (let r = 0; r < 2; r++) hit(t + r * ST / 2, 'highpass', 8000, 0.7, 0.12, 0.03); events.push({ t, type: 'roll' }); }
+    else hit(t, 'highpass', 8000, 0.7, s % 4 === 2 ? 0.16 : 0.07, 0.03);
+  }
+  if (sec !== 'verse' || bar % 2) { const n = HOOK[(bar % 2) * 16 + s]; if (n > 0 && (big || sec === 'break' || s % 4 === 0)) { chopAt(t, n, ST * 1.6); events.push({ t, type: 'chop' }); } }
+}
+
+// --- 映像 ---
+let moshEnd = 0, freeze = 0, inv = 0, str = null, copyKind = 0, melting = 0;
+const blocks = [];   // ブロックずれ：画面の矩形を何コマかずらして残す
+const addBlocks = n => { for (let i = 0; i < n; i++) blocks.push({ x: Math.random() * W, y: Math.random() * H, w: 80 + Math.random() * 420, h: 20 + Math.random() * 180, dx: (Math.random() - 0.5) * 240, dy: (Math.random() - 0.5) * 60, life: 2 + (Math.random() * 6 | 0) }); };
+let bar = 0, sec = 'intro', barT = 0, kick = 0, snare = 0, chop = 0, roll = 0, pal = 0, fcOn = false, word = 0, wordT = -9, flash = 0;
+function onEvent(e) {
+  if (e.type === 'bar') {
+    bar = e.bar; sec = e.sec; barT = e.t;
+    if (bar % 2 === 0) video = vids[(bar >> 1) % vids.length];
+    pal = bar % PALETTES.length;
+    fcOn = sec === 'break' || (sec === 'verse' && bar % 2 === 1) || sec === 'intro' && bar % 2 === 1;   // A メロは1小節おき、ブレイクはずっと偽色
+    // 4小節ごとにカットで次のメンバーへ。そのあいだは2小節の引きから、2小節かけてアップへゆっくり寄っていく。
+    // 追う速さ：ブレイクはすごく遅く（7秒ほどかけて寄る）、前奏と A メロは遅く、サビは速く、ラスサビはもっと速い
+    focus = bar >> 2; closeUp = (bar >> 1) % 2 === 1 && sec !== 'intro'; snap = bar % 4 === 0;
+    camRate = { intro: 0.3, verse: 0.5, chorus: 2.5, break: 0.15, last: 5 }[sec];
+    if (bar % 4 === 0) copyKind = (bar >> 2) % 4;
+    if (sec === 'chorus' || sec === 'last') inv = 2;   // サビは小節の頭で反転
+  }
+  if (e.type === 'kick') {
+    kick = 1; moshSeed += 1 + Math.random() * 2; newSpots();
+    win = Math.random() < 0.6 ? [W * (0.05 + Math.random() * 0.3), H * (0.1 + Math.random() * 0.4), W * (0.4 + Math.random() * 0.3), H * (0.15 + Math.random() * 0.2)] : null;
+    if (sec !== 'intro' && Math.random() < 0.15) freeze = 2 + (Math.random() * 3 | 0);   // コマ止め
+    if (sec === 'chorus' || sec === 'last') { fcOn = !fcOn; pal = (pal + 1) % PALETTES.length; if (e.s % 8 === 0) { word = (word + 1) % WORDS.length; wordT = e.t; } }   // サビはキックごとに偽色を入れ切りし、文字を替える
+  }
+  if (e.type === 'snare') { snare = 1; if (sec !== 'intro') { popSticker(); addBlocks(4); } if (sec === 'last') { flash = 1; inv = 1; burstT = e.t; } }
+  if (e.type === 'chop') { chop = 1; if (sec === 'break' && Math.random() < 0.5) popSticker(); if (Math.random() < 0.35) str = { vert: Math.random() < 0.3, p: W * (0.15 + Math.random() * 0.7), life: 2 + (Math.random() * 4 | 0) }; }   // ピクセルの引き伸ばし
+  if (e.type === 'roll') { roll = 1; addBlocks(2); }
+}
+function frame() {
+  requestAnimationFrame(frame);
+  while (ac && events.length && events[0].t <= ac.currentTime) onEvent(events.shift());
+  const t = now();
+  kick *= 0.85; snare *= 0.8; chop *= 0.85; roll *= 0.8; flash *= 0.8; melting *= 0.96;
+  const z = 1 + (sec === 'chorus' || sec === 'last' ? kick * 0.04 : 0);   // サビだけキックで少し寄る
+  const split = (2 + kick * 6 + roll * 8) * (sec === 'intro' ? 0.3 : 1);   // RGB のずれ（1マス3px）
+  if (freeze > 0) freeze--; else if (!sample(z, fcOn ? +$('fc').value : 0, pal, split)) return;
+  const moshing = t < moshEnd;
+  push = ((bar % 4) + Math.min(1, (t - barT) / (ST * 16))) / 4;   // 4小節かけてゆっくり寄る
+  meltFrame(0, t);   // 溶かしは使わない（渦に見えるので）。コマを写すだけ
+  // 横のにじみ：ロールとブレイクで、横にずらして薄く重ねる
+  const smear = roll * 0.8 + (sec === 'break' ? 0.6 : 0) + snare * 0.3;
+  if (moshing) mosh(); else { ctx.imageSmoothingEnabled = true; ctx.drawImage(melt, 0, 0, W, H); }   // 画面は分けない
+  if (!moshing) personCopies(copyKind, t);   // 一人だけ切り抜いて重ねる
+  if (!moshing && smear > 0.05) for (let i = 1; i <= 4; i++) { ctx.globalAlpha = 0.22 * smear; ctx.drawImage(grab, i * W * 0.02 * smear, 0, W, H); ctx.drawImage(grab, -i * W * 0.012 * smear, 0, W, H); }
+  ctx.globalAlpha = 1;
+  // 残像：ブレイクとラスサビで前のコマを重ねる
+  const tr = sec === 'break' ? 0.55 : sec === 'last' ? 0.3 : 0;
+  if (tr) { ctx.globalAlpha = tr; ctx.drawImage(trail, 0, 0, W, H); ctx.globalAlpha = 1; }
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]; ctx.drawImage(c, b.x, b.y, b.w, b.h, b.x + b.dx, b.y + b.dy, b.w, b.h);
+    if (--b.life <= 0) blocks.splice(i, 1);
+  }
+  if (str) {   // ある列（行）の1px を画面の端まで引き伸ばす
+    if (str.vert) ctx.drawImage(c, 0, str.p * H / W, W, 1, 0, str.p * H / W, W, H - str.p * H / W); else ctx.drawImage(c, str.p, 0, 1, H, str.p, 0, W - str.p, H);
+    if (--str.life <= 0) str = null;
+  }
+  tctx.drawImage(c, 0, 0, trail.width, trail.height);
+  if ($('stickers').checked) drawStickers(t);
+  if ($('type').checked && t - wordT < ST * 4) bounceWord(WORDS[word], H * 0.5, W * 0.28, wordT, t);   // 小節の頭と真ん中のキックから16分4つぶんだけ（出しっぱなしにしない）
+  if (sec === 'intro' && $('type').checked && t - barT < ST * 10)   // 前奏はグループ名と曲名を1小節に1つずつ
+    bounceWord(['LOLLIBYTE', '롤리바이트', 'glitter.exe', 'LOLLIBYTE'][bar % 4], H * 0.5, W * 0.24, barT, t);
+  if (flash > 0.05) { ctx.fillStyle = `rgba(255,255,255,${flash * 0.6})`; ctx.fillRect(0, 0, W, H); }
+  if (inv > 0) { inv--; ctx.globalCompositeOperation = 'difference'; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H); ctx.globalCompositeOperation = 'source-over'; }
+}
+
+$('aspect').onchange = setSize; setSize();
+requestAnimationFrame(frame);
+$('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+
+$('rec').onclick = e => {
+  startAudio(); step = 0; vids.forEach(v => { v.currentTime = 0; });
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(window.lastBlob = new Blob(chunks, { type }));
+    a.download = `sugarrush_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), $('dur').value * 1000);
+};
+</script>
+
+</body>
+</html>
