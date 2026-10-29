@@ -326,7 +326,7 @@ function karaoke(t, bar) {
   // 上の行と下の行が交互に歌われる。歌い終わった行は、次の次の行に入れ替わる
   const b0 = bar - (k % 2), top = (b0 >> 1) % 2 === 0;
   const p = ((k % 2) + Math.min(1, (t - barT) / (ST * 16))) / 2 * 1.1 - 0.05;   // 2小節かけて色を変える
-  const y = H * 0.8, size = 62 * u, gap = 170 * u;
+  const y = H - 384 * u, size = 62 * u, gap = 170 * u;   // 下から測る（1:1 でも2行目がはみ出さない）
   const L1 = lyricAt(top ? b0 : b0 + 2), L2 = lyricAt(top ? b0 + 2 : b0);
   ctx.textBaseline = 'alphabetic';
   if (L1) { karaokeLine(L1[0], m, y, size, 'left', top ? p : 0); if (top) { ctx.textAlign = 'left'; rgbText(L1[1], m, y + 58 * u, 32 * u, 3 * u, 'italic'); } }
