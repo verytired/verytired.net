@@ -94,9 +94,8 @@ stage.onload = () => {
   const start = W.MediaRecorder?.prototype.start;
   if (start) W.MediaRecorder.prototype.start = function (...a) { recorder = this; return start.apply(this, a); };
 
-  // 素材の動画を読む作品（slowdive）は、Play を押すまで動画も止めておく
-  D.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { if (!playing) v.pause(); }));
-  D.querySelectorAll('video').forEach(v => v.pause());
+  // 素材の動画を読む作品（slowdive・ghostidol・sugarrush）は、Play を押すまで動画も止めておく
+  media().forEach(v => { v.addEventListener('play', () => { if (!playing) v.pause(); }); v.pause(); });
   D.addEventListener('click', e => { if (e.isTrusted && D.getElementById('play')) toggle(); });  // バーから中のボタンを押した click は拾わない
   D.addEventListener('keydown', key);
 };

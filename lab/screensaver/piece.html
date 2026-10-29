@@ -35,11 +35,10 @@ const lo = document.createElement('canvas'), lctx = lo.getContext('2d', { willRe
 const vh = document.createElement('canvas'), vctx = vh.getContext('2d');     // lo を VHS で崩したもの（lo は崩さずに残す。コマ止めで同じコマを何度も崩すため）
 const glow = document.createElement('canvas'), gctx = glow.getContext('2d'); // 光：縮小してぼかした写し
 const vids = SCENES.map(n => Object.assign(document.createElement('video'), { src: `src/${n}_v1.mp4`, muted: true, loop: true, playsInline: true }));
-let W, H, S, X0, Y0;   // 正方形の映像を置く位置
+let W, H;
 const setSize = () => {
   [W, H] = document.getElementById('aspect').value.split('x').map(Number);
-  c.width = W; c.height = H; S = Math.min(W, H); X0 = (W - S) / 2; Y0 = (H - S) / 2;
-  glow.width = glow.height = S / 4;
+  c.width = W; c.height = H; glow.width = W / 4; glow.height = H / 4;
 };
 
 // 粒：ノイズの模様を4枚作っておき、毎コマ替えてずらして重ねる
@@ -59,6 +58,7 @@ const mtof = m => 440 * 2 ** ((m - 69) / 12);
 function startAudio() {
   if (ac) return ac.resume();
   ac = new AudioContext();
+  vids.forEach(v => v.play());   // 素材の動画も音と一緒に始める
   const comp = ac.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 3;
   out = ac.createGain(); out.gain.value = 0.8; out.connect(comp);
   comp.connect(ac.destination); comp.connect(audioDest = ac.createMediaStreamDestination());
@@ -190,56 +190,58 @@ function onEvent(e) {
   if (e.type === 'box') { box = 1; if (drop && Math.random() < 0.5) roll = lo.height * (0.05 + Math.random() * 0.15); }
   if (e.type === 'kick') kick = 1;
 }
-// 動画の真ん中を正方形に切り抜いて lctx に描く
+// 動画の真ん中を画面の比率で切り抜いて lctx に描く
 function drawScene(i, a) {
   const v = vids[i]; if (v.readyState < 2) return;
-  const m = Math.min(v.videoWidth, v.videoHeight), z = 1 + kick * 0.03;   // キックで少し寄る
+  const k = Math.min(v.videoWidth / W, v.videoHeight / H) / (1 + kick * 0.03), sw = W * k, sh = H * k;   // キックで少し寄る
   lctx.globalAlpha = a;
-  lctx.drawImage(v, (v.videoWidth - m / z) / 2, (v.videoHeight - m / z) / 2, m / z, m / z, 0, 0, lo.width, lo.height);
+  lctx.drawImage(v, (v.videoWidth - sw) / 2, (v.videoHeight - sh) / 2, sw, sh, 0, 0, lo.width, lo.height);
 }
+let still = false;   // 音が鳴っていないあいだ（始める前・一時停止中）は、1コマ描いたら止めておく
 function frame() {
   requestAnimationFrame(frame);
+  if (still && (!ac || ac.state !== 'running')) return;
   const t = ac ? ac.currentTime : performance.now() / 1000;
   while (ac && events.length && events[0].t <= t) onEvent(events.shift());
   box *= 0.9; kick *= 0.88; gl *= 0.9; roll *= 0.88;
 
   // にじみ：小さく描いてから拡大する。にじみのつまみが大きいほど小さく
   const r = Math.round(480 - 340 * +document.getElementById('blur').value);
-  if (lo.width !== r) lo.width = lo.height = vh.width = vh.height = r;
+  const rh = Math.round(r * H / W);
+  if (lo.width !== r || lo.height !== rh) { lo.width = vh.width = r; lo.height = vh.height = rh; }
   if (t >= freezeUntil) {   // コマ止めのあいだは lo を描き替えない
     const mix = Math.max(0, Math.min(1, (t - tCut) / 0.6));   // 0.6秒のディゾルブ
     drawScene(prev, 1); drawScene(cur, mix); lctx.globalAlpha = 1;
   }
-  const im = lctx.getImageData(0, 0, r, r);
-  vhs(im.data, r, r, 0.35 + gl * 1.1 + (drop ? 0.6 : 0), t);
+  const im = lctx.getImageData(0, 0, r, rh);
+  vhs(im.data, r, rh, 0.35 + gl * 1.1 + (drop ? 0.6 : 0), t);
   vctx.putImageData(im, 0, 0);
 
-  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
   ctx.imageSmoothingEnabled = true;
   ctx.filter = 'saturate(1.3) contrast(1.05)';
-  ctx.drawImage(vh, X0, Y0, S, S);
+  ctx.drawImage(vh, 0, 0, W, H);
   ctx.filter = 'none';
   ctx.fillStyle = 'rgba(0,0,0,0.16)';   // 走査線
-  for (let y = Y0; y < Y0 + S; y += 4) ctx.fillRect(X0, y, S, 2);
+  for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 2);
 
   // 光：ぼかした写しをスクリーンで重ねる。オルゴールの音で強く
   gctx.filter = 'blur(6px)'; gctx.globalCompositeOperation = 'copy';
-  gctx.drawImage(c, X0, Y0, S, S, 0, 0, glow.width, glow.height);
+  gctx.drawImage(c, 0, 0, glow.width, glow.height);
   ctx.globalCompositeOperation = 'screen';
   ctx.globalAlpha = Math.min(1, +document.getElementById('glow').value * 1.1 + box * 0.25);
-  ctx.drawImage(glow, X0, Y0, S, S);
+  ctx.drawImage(glow, 0, 0, W, H);
 
   // 粒
   ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = 0.14;
-  ctx.save(); ctx.beginPath(); ctx.rect(X0, Y0, S, S); ctx.clip();
+  ctx.save();
   ctx.translate(Math.random() * 256, Math.random() * 256);
   ctx.fillStyle = grains[Math.random() * 4 | 0]; ctx.fillRect(-256, -256, W + 512, H + 512);
   ctx.restore();
   ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  still = vids[0].readyState >= 2;
 }
 
 document.getElementById('aspect').onchange = setSize; setSize();
-vids.forEach(v => v.play());
 requestAnimationFrame(frame);
 document.getElementById('play').onclick = startAudio;
 c.onpointerdown = startAudio;
