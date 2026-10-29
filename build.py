@@ -2,13 +2,12 @@
 """hitori_av の日別フォルダから lab/ と index.html を作る。
 
 使い方: python3 build.py [../hitori_av]
-- lab/<日付_名前>/piece.html  … 作品の HTML をそのままコピー（自己完結しているので書き換えない）
-- lab/<日付_名前>/index.html  … player.html で piece.html を包む（英語の操作バー）
-- lab/<日付_名前>/loop.mp4     … 1:1 版の mp4 から作る無音・480px・8秒のループ（元の mp4 はサイトに入れない）
+- lab/<名前>/piece.html  … 作品の HTML をそのままコピー（自己完結しているので書き換えない）
+- lab/<名前>/index.html  … player.html で piece.html を包む（英語の操作バー）
+- lab/<名前>/loop.mp4     … 1:1 版の mp4 から作る無音・480px・8秒のループ（元の mp4 はサイトに入れない）
 - index.html                  … template.html の {{ITEMS}} を埋める
 """
 import html, re, shutil, subprocess, sys
-from datetime import date
 from pathlib import Path
 
 SRC = Path(sys.argv[1] if len(sys.argv) > 1 else "../hitori_av").resolve()
@@ -27,9 +26,9 @@ def first_sentence(readme):
 
 
 def build_item(d):
-    date, name = d.name.split("_", 1)
+    name = d.name.split("_", 1)[1]
     piece, mp4 = d / f"{name}.html", d / f"{name}.mp4"
-    dst = LAB / d.name
+    dst = LAB / name  # URL に日付は出さない
     dst.mkdir(parents=True, exist_ok=True)
     if piece.exists():
         shutil.copy(piece, dst / "piece.html")
@@ -42,7 +41,7 @@ def build_item(d):
                         "-c:v", "libx264", "-crf", "32", "-preset", "slow", "-pix_fmt", "yuv420p",
                         "-movflags", "+faststart", loop], check=True)
     return {
-        "date": date, "name": name, "dir": d.name,
+        "name": name,
         "desc": first_sentence(d / "README.md") if (d / "README.md").exists() else "",
         "en": EN.get(d.name, "").strip(),
         "live": piece.exists(),
@@ -51,25 +50,24 @@ def build_item(d):
 
 def player(i, n):
     page = (OUT / "player.html").read_text()
-    for k, v in {"NUM": f"{n:03d}", "NAME": i["name"], "DATE": i["date"], "DESC": i["en"] or i["desc"]}.items():
+    for k, v in {"NUM": f"{n:03d}", "NAME": i["name"], "DESC": i["en"] or i["desc"]}.items():
         page = page.replace("{{%s}}" % k, html.escape(v))
-    (LAB / i["dir"] / "index.html").write_text(page)
+    (LAB / i["name"] / "index.html").write_text(page)
 
 
 def tile(i, n):
-    href = f"lab/{i['dir']}/" if i["live"] else f"lab/{i['dir']}/loop.mp4"
+    href = f"lab/{i['name']}/" if i["live"] else f"lab/{i['name']}/loop.mp4"
     return (f'<a class="tile" href="{href}">'
-            f'<video src="lab/{i["dir"]}/loop.mp4" muted loop playsinline preload="none"></video>'
-            f'<span class="cap"><b>#{n:03d}</b> {i["date"]} <i>{html.escape(i["name"])}</i>'
+            f'<video src="lab/{i["name"]}/loop.mp4" muted loop playsinline preload="none"></video>'
+            f'<span class="cap"><b>#{n:03d}</b> <i>{html.escape(i["name"])}</i>'
             f'<em>{html.escape(i["en"] or i["desc"])}</em></span></a>')
 
 
 def main():
-    today = date.today().isoformat()  # 先の日付のフォルダ（予約分）は出さない
-    dirs = sorted(d for d in SRC.iterdir() if d.is_dir() and re.match(r"\d{4}-\d{2}-\d{2}_", d.name) and d.name[:10] <= today)
+    dirs = sorted(d for d in SRC.iterdir() if d.is_dir() and re.match(r"\d{4}-\d{2}-\d{2}_", d.name))  # 並び順にだけ日付を使う
     for old in LAB.glob("*") if LAB.exists() else []:
-        if old.name not in {d.name for d in dirs}:
-            shutil.rmtree(old)  # 日付を先に動かした・フォルダを消した場合の残骸
+        if old.name not in {d.name.split("_", 1)[1] for d in dirs}:
+            shutil.rmtree(old)  # 名前を変えた・フォルダを消した場合の残骸
     items = [build_item(d) for d in dirs]
     numbered = list(enumerate(items, 1))[::-1]  # 新しい順、番号は古い順に振る
     for n, i in numbered:

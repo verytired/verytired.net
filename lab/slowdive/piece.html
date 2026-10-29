@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Slow Dive</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <label>動画 <input type="file" id="file" accept="video/*"></label>
+  <select id="rate">
+    <option value="1" selected>速さ 1倍</option>
+    <option value="0.5">速さ 0.5倍</option>
+    <option value="0.25">速さ 0.25倍</option>
+    <option value="0.125">速さ 0.125倍</option>
+  </select>
+  <select id="tone">
+    <option value="vhs" selected>VHS グリッチだけ（ドットなし）</option>
+    <option value="mix">色 元の色とパレットを交互</option>
+    <option value="orig">色 元の色のまま</option>
+    <option value="pal">色 パレット</option>
+  </select>
+  <label>RGB のずれ <input type="range" id="rgb" min="0" max="1" step="0.05" value="0.5"></label>
+  <label>グリッチの強さ <input type="range" id="glitch" min="0" max="1" step="0.05" value="0.5"></label>
+  <label><input type="checkbox" id="vhs" checked> VHS をかけてからドットにする</label>
+  <div id="msg"></div>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="32"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<canvas id="c"></canvas>
+<video id="v" src="dive.mp4" muted loop playsinline hidden></video>
+
+<script>
+// 超スローで再生した動画を、毎フレームディザの粗い画素か、明るさで波打つ横線に置き換え、4色のパレットで塗って光らせる。Boards of Canada 風の曲でつまみを動かす
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+const small = document.createElement('canvas'), sctx = small.getContext('2d');   // ディザの画素を1マス1ピクセルで描く
+const glow = document.createElement('canvas'), gctx = glow.getContext('2d');     // 光：縮小してぼかした写し
+const video = document.getElementById('v'), msg = document.getElementById('msg');
+const grab = document.createElement('canvas'), gr = grab.getContext('2d', { willReadFrequently: true });
+let W, H, col = null, lum = null, LW = 0, LH = 0, peak = 1, floor = 0, nFrame = 0, invert = false;   // lum: 動画の明るさ（0..1）を LW×LH の格子に縮めたもの、peak: ならすための明るさ
+const setSize = () => {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  c.width = W; c.height = H; glow.width = W / 4; glow.height = H / 4;
+};
+// 動画の今のコマを画面いっぱいに切り抜いて、3px 四方ごとの明るさにする。毎フレーム呼ぶ。ディザも線もここから読む
+function sample() {
+  if (!W || video.readyState < 2) return;
+  LW = W / 3 | 0; LH = H / 3 | 0;
+  if (grab.width !== LW || grab.height !== LH || !lum) { grab.width = LW; grab.height = LH; lum = new Float32Array(LW * LH); col = new Float32Array(LW * LH * 3); }
+  const s = Math.max(LW / video.videoWidth, LH / video.videoHeight), w = video.videoWidth * s, h = video.videoHeight * s;
+  gr.drawImage(video, (LW - w) / 2, (LH - h) / 2, w, h);
+  let im, d;
+  try { im = gr.getImageData(0, 0, LW, LH); d = im.data; }
+  catch (e) { msg.textContent = 'file:// では動画の画素を読めないので、「動画」から mp4 を選んでください'; lum = null; return; }
+  msg.textContent = '';
+  if (document.getElementById('vhs').checked || vhsOnly()) { vhs(d); gr.putImageData(im, 0, 0); }   // VHS だけのときは、崩したコマをそのまま描く
+  let sum = 0;
+  for (let i = 0; i < lum.length; i++) {
+    sum += lum[i] = (d[i * 4] * 0.3 + d[i * 4 + 1] * 0.59 + d[i * 4 + 2] * 0.11) / 255;
+    col[i * 3] = d[i * 4] / 255; col[i * 3 + 1] = d[i * 4 + 1] / 255; col[i * 3 + 2] = d[i * 4 + 2] / 255;   // 元の色（元の色のままドットにするとき使う）
+  }
+  // 昼の空のように全体が明るい動画は、明暗を反転して空を暗く、人を光らせる
+  if (nFrame % 30 === 0) invert = sum / lum.length > 0.45;
+  if (invert) for (let i = 0; i < lum.length; i++) lum[i] = 1 - lum[i];
+  // 明るさをならす：暗いほうから40%の値を 0、明るいほうから2%の値を 1 に合わせる。画面の大半を占める背景が暗く沈む。並べ替えは重いので30フレームに1回
+  if (nFrame++ % 30 === 0) { const q = Float32Array.from(lum).sort(); floor = q[lum.length * 0.4 | 0]; peak = Math.max(floor + 0.05, q[lum.length * 0.98 | 0]); }
+  for (let i = 0; i < lum.length; i++) lum[i] = Math.min(1, Math.max(0, (lum[i] - floor) / (peak - floor)));
+}
+const vhsOnly = () => document.getElementById('tone').value === 'vhs';
+// --- VHS ---
+// ドットにする前に、縮めたコマ（d、RGBA）を VHS 風に崩す。G（グリッチの強さ 0..1）で全部まとめて強くなる。行ごとに、
+//   1. 行を左右にずらす（テープの揺れ・キック・トラッキングの帯で大きく）。スネアで画面が縦に流れることがある（roll）
+//   2. 明るさ（Y）と色（I, Q）に分け、色だけ横にぼかして右へずらす（色のにじみ）
+//   3. 黒を浮かせ、彩度を少し落とし、暖色に寄せ、ノイズを足す
+//   4. R を右、B を左へずらす（RGB のずれ）。キックと帯の中で広がる
+// トラッキングの帯は画面を下へ流れ、その中は行が大きくずれる。G が 0.5 を超えると帯が2本になる
+let Yr = new Float32Array(0), Ir = Yr, Qr = Yr, Rr = Yr, Br = Yr, roll = 0;
+function vhs(d) {
+  if (Yr.length !== LW) [Yr, Ir, Qr, Rr, Br] = [0, 0, 0, 0, 0].map(() => new Float32Array(LW));
+  const G = +document.getElementById('glitch').value;
+  const t = ac ? ac.currentTime : performance.now() / 1000;
+  const w = ac ? Math.sin(2 * Math.PI * 0.33 * (t - wowT0)) : 0;   // 音のワウと同じ揺れ
+  const bh = LH * (0.02 + 0.02 * G);   // トラッキングの帯の高さ
+  const bands = [((t * 0.12) % 1.4 - 0.2) * LH]; if (G > 0.5) bands.push(((t * 0.31 + 0.5) % 1.4 - 0.2) * LH);
+  const R = 4 + Math.round(G * 3), CS = 2 + Math.round(G * 3);   // 色のぼかしの半径と、色のずれ（マス）
+  const S = +document.getElementById('rgb').value, split0 = S * 5 + kick * S * 8;   // RGB のずれ（マス、1マス3px）。キックで広がる
+  const shake = 1 + G * 1.2, noise = 0.05 + G * 0.06;
+  roll *= 0.85; const ro = Math.round(roll);
+  for (let y = 0; y < LH; y++) {
+    const inBand = bands.some(b => Math.abs(y - b) < bh);
+    const off = Math.round(Math.sin(y * 0.04 + t * 2.5) * (0.6 + Math.abs(w)) * shake + kick * (Math.random() * 6 - 3) * shake + (inBand ? (Math.random() - 0.5) * (12 + 16 * G) : 0));
+    const r = y * LW, src = ((y + ro) % LH) * LW;
+    for (let x = 0; x < LW; x++) {
+      const i = (src + Math.min(LW - 1, Math.max(0, x - off))) * 4, R0 = d[i] / 255, G0 = d[i + 1] / 255, B0 = d[i + 2] / 255;
+      Yr[x] = 0.299 * R0 + 0.587 * G0 + 0.114 * B0; Ir[x] = 0.596 * R0 - 0.274 * G0 - 0.322 * B0; Qr[x] = 0.211 * R0 - 0.523 * G0 + 0.312 * B0;
+    }
+    let si = 0, sq = 0;   // 色の移動平均（左から右へ）
+    for (let x = -R; x < LW; x++) {
+      const a = Math.min(LW - 1, Math.max(0, x + R)), b = Math.min(LW - 1, Math.max(0, x - R - 1));
+      si += Ir[a] - (x >= 1 ? Ir[b] : 0); sq += Qr[a] - (x >= 1 ? Qr[b] : 0);
+      const X = x + CS;
+      if (X < 0 || X >= LW) continue;
+      const n = Math.min(2 * R + 1, x + R + 1);   // 足した数（端は端の色をくり返して数える）
+      let Y = 0.05 + Yr[X] * 0.88 + (Math.random() - 0.5) * noise;
+      const I = si / n * 0.8, Q = sq / n * 0.8, o = (r + X) * 4;
+      Rr[X] = Math.min(255, (Y + 0.956 * I + 0.621 * Q) * 255 * 1.04);
+      d[o + 1] = (Y - 0.272 * I - 0.647 * Q) * 255;
+      Br[X] = (Y - 1.106 * I + 1.703 * Q) * 255 * 0.93;
+    }
+    const split = Math.round(split0 * (inBand ? 2 : 1));   // 帯の中はずれを倍に
+    for (let x = 0; x < LW; x++) {   // RGB のずれ：R は左から、B は右から読む
+      const o = (r + x) * 4;
+      d[o] = Rr[Math.max(0, x - split)]; d[o + 2] = Br[Math.min(LW - 1, x + split)];
+    }
+  }
+}
+
+// 明るさの読み出し。gain と mid で明るさと中間調を動かす（Dither Boy の Brightness / Midtones にあたる）
+const look = (x, y) => lum[Math.min(LH - 1, y | 0) * LW + Math.min(LW - 1, x | 0)];
+const tone = (v, gain, mid) => Math.min(1, Math.max(0, v * gain) ** mid);
+
+// --- パレット ---
+// 暗い順に4色。いちばん暗い色が地
+const PALETTES = [
+  ['#06061a', '#2a4bd7', '#5aa8ff', '#eaf6ff'],   // bubblegum の青
+  ['#120800', '#7a2e00', '#ff8a1f', '#ffe2b0'],   // 琥珀
+  ['#05110a', '#1f6f3a', '#7cff6b', '#f2ffe0'],   // 燐光
+  ['#140010', '#8a1f6b', '#ff5fb8', '#ffe6f4'],   // ローズ
+];
+let pal = 0;
+const rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+
+// --- ディザ（Sierra Lite） ---
+// 1マス cell px の格子に縮め、4段階に丸める。丸めた誤差を右に 2/4、左下と下に 1/4 ずつ配る
+let err = new Float32Array(0);
+// 元の色のままのディザ：R・G・B をそれぞれ5段階に丸め、誤差をチャンネルごとに Sierra Lite で配る。色味は動画のまま、ドットだけになる
+let errC = new Float32Array(0);
+function ditherColor(cell, gain, jitter) {
+  const cw = Math.ceil(W / cell), chh = Math.ceil(H / cell), rw = cw + 2;
+  if (small.width !== cw || small.height !== chh) { small.width = cw; small.height = chh; }
+  if (errC.length < rw * (chh + 1) * 3) errC = new Float32Array(rw * (chh + 1) * 3);
+  errC.fill(0);
+  const img = sctx.createImageData(cw, chh), px = img.data, k = cell / 3;
+  for (let y = 0; y < chh; y++) for (let x = 0; x < cw; x++) {
+    const j = (Math.min(LH - 1, y * k | 0) * LW + Math.min(LW - 1, x * k | 0)) * 3, e = (y * rw + x + 1) * 3, p = (y * cw + x) * 4;
+    for (let ch = 0; ch < 3; ch++) {
+      const v = col[j + ch] * gain + (Math.random() - 0.5) * jitter + errC[e + ch];
+      const q = Math.min(4, Math.max(0, Math.round(v * 4))), dd = v - q / 4;
+      errC[e + 3 + ch] += dd / 2; errC[e + rw * 3 - 3 + ch] += dd / 4; errC[e + rw * 3 + ch] += dd / 4;
+      px[p + ch] = q * 63.75;
+    }
+    px[p + 3] = 255;
+  }
+  sctx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(small, 0, 0, cw * cell, chh * cell);
+  if (cell >= 8) {   // マスの境目に細い黒い線を引き、画素の粒を見せる
+    ctx.fillStyle = '#000'; ctx.globalAlpha = 0.35;
+    for (let x = 0; x < W; x += cell) ctx.fillRect(x, 0, 1, H);
+    for (let y = 0; y < H; y += cell) ctx.fillRect(0, y, W, 1);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function dither(cell, gain, mid, jitter) {
+  const cw = Math.ceil(W / cell), chh = Math.ceil(H / cell);
+  if (small.width !== cw || small.height !== chh) { small.width = cw; small.height = chh; }
+  if (err.length < (cw + 2) * (chh + 1)) err = new Float32Array((cw + 2) * (chh + 1));
+  err.fill(0);
+  const img = sctx.createImageData(cw, chh), px = img.data, cols = PALETTES[pal].map(rgb), k = cell / 3;
+  for (let y = 0; y < chh; y++) for (let x = 0; x < cw; x++) {
+    const e = (y * (cw + 2)) + x + 1;
+    const v = tone(look(x * k, y * k), gain, mid) + (Math.random() - 0.5) * jitter + err[e];
+    const q = Math.min(3, Math.max(0, Math.round(v * 3))), d = v - q / 3;
+    err[e + 1] += d / 2; err[e + cw + 1] += d / 4; err[e + cw + 2] += d / 4;
+    const p = (y * cw + x) * 4;
+    [px[p], px[p + 1], px[p + 2]] = cols[q]; px[p + 3] = 255;
+  }
+  sctx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(small, 0, 0, cw * cell, chh * cell);
+  // マスの境目に細い地の線を引き、画素の粒を見せる
+  if (cell >= 8) {
+    ctx.fillStyle = PALETTES[pal][0]; ctx.globalAlpha = 0.5;
+    for (let x = 0; x < W; x += cell) ctx.fillRect(x, 0, 1, H);
+    for (let y = 0; y < H; y += cell) ctx.fillRect(0, y, W, 1);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// --- 線（Modulation Lines） ---
+// gap px おきに横線を引き、明るいところほど細かく大きく波打たせる。暗いところは線を切り、ところどころに粒を置く
+function lines(gap, gain, mid, t, amp, wob, bands) {
+  const P = PALETTES[pal];
+  ctx.fillStyle = P[0]; ctx.fillRect(0, 0, W, H);
+  ctx.lineWidth = 2; ctx.lineJoin = 'round';
+  for (const [lv, col] of [[0.12, P[1]], [0.5, P[2]], [0.8, P[3]]]) {   // 明るさの段ごとに色を替えて重ねる
+    ctx.strokeStyle = col; ctx.beginPath();
+    for (let r = 0, y0 = gap / 2; y0 < H; r++, y0 += gap) {
+      let off = Math.sin(r * 0.21 + t * 0.7) * wob;   // テープの揺れで行ごとに左右へ
+      for (const b of bands) if (r >= b.r0 && r < b.r1) off += b.dx;   // グリッチ：何行かをまとめてずらす
+      const f = 0.35 + 0.25 * Math.sin(r * 0.37 + t * 0.3), ph = t * 4 + r * 1.7;
+      let pen = false;
+      for (let x = 0; x < W; x += 3) {
+        const v = tone(look((x - off) / 3, y0 / 3), gain, mid);
+        if (v < lv) { pen = false; continue; }
+        const y = y0 + Math.sin(x * f + ph) * v * amp * gap * 0.5;
+        pen ? ctx.lineTo(x, y) : ctx.moveTo(x, y); pen = true;
+      }
+    }
+    ctx.stroke();
+  }
+  // 暗いところの粒。位置は行と列で決め、時間で瞬かせる
+  ctx.fillStyle = P[2];
+  const tt = t * 6 | 0;
+  for (let y0 = gap / 2; y0 < H; y0 += gap) for (let x = 0; x < W; x += 12) {
+    const v = tone(look(x / 3, y0 / 3), gain, mid);
+    if (v > 0.04 && v < 0.3 && hash(x, y0, tt) < v * 1.6) ctx.fillRect(x - 1.5, y0 - 1.5, 3, 3);
+  }
+}
+const hash = (a, b, c) => { const s = Math.sin(a * 12.9898 + b * 78.233 + c * 37.719) * 43758.5453; return s - Math.floor(s); };
+
+// --- 光（Epsilon Glow にあたる） ---
+// 画面を 1/4 に縮めてぼかし、足し算で重ねる
+function bloom(strength) {
+  gctx.filter = 'blur(6px)'; gctx.globalCompositeOperation = 'copy';
+  gctx.drawImage(c, 0, 0, glow.width, glow.height);
+  ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = strength;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(glow, 0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+
+// --- 音 ---
+// 88BPM の Boards of Canada 風。テープの揺れ（ワウ・フラッター）を全部の発振器の detune にかける。
+// デチューンしたノコギリ波のパッド、こもったビート、ディレイのかかったベル、テープのヒスとレコードのプチ音
+const BPM = 88, ST = 60 / BPM / 4, events = [];
+let step = 0;   // 録画のときは 0 に戻して、曲の頭から録る
+let ac, out, audioDest, wow, wowT0 = 0, drums, echo, noiseBuf;
+const mtof = m => 440 * 2 ** ((m - 69) / 12);
+function startAudio() {
+  if (ac) return ac.resume();
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4;
+  const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 5500;   // テープらしく高域を丸める
+  const sat = ac.createWaveShaper(); sat.curve = Float32Array.from({ length: 1024 }, (_, i) => Math.tanh((i / 511.5 - 1) * 1.8) / Math.tanh(1.8));
+  out = ac.createGain(); out.gain.value = 0.7;
+  out.connect(sat).connect(lp).connect(comp);
+  comp.connect(ac.destination); comp.connect(audioDest = ac.createMediaStreamDestination());
+
+  // ワウ（0.33Hz、±22セント）とフラッター（5.7Hz、±4セント）を足して、発振器の detune に送る
+  wow = ac.createGain();
+  for (const [f, d] of [[0.33, 22], [5.7, 4]]) { const o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = f; g.gain.value = d; o.connect(g).connect(wow); o.start(); }
+  wowT0 = ac.currentTime;
+
+  echo = ac.createDelay(2); echo.delayTime.value = ST * 3;
+  const fb = ac.createGain(); fb.gain.value = 0.4;
+  const ef = ac.createBiquadFilter(); ef.type = 'lowpass'; ef.frequency.value = 2000;
+  echo.connect(ef).connect(fb).connect(echo); ef.connect(out);
+
+  drums = ac.createBiquadFilter(); drums.type = 'lowpass'; drums.frequency.value = 2400; drums.connect(out);   // ビートはこもらせる
+
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  const hiss = noise(), hf = ac.createBiquadFilter(), hg = ac.createGain();
+  hf.type = 'highpass'; hf.frequency.value = 3500; hg.gain.value = 0.02;
+  hiss.connect(hf).connect(hg).connect(out); hiss.start();
+
+  let next = ac.currentTime + 0.1;
+  setInterval(() => { while (next < ac.currentTime + 0.2) { play(step++, next); next += ST; } }, 25);
+}
+const noise = () => { const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true; s.loopStart = Math.random(); return s; };
+function env(g, t, a, hold, rel, v) { g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(v, t + a); g.gain.setValueAtTime(v, t + a + hold); g.gain.linearRampToValueAtTime(0, t + a + hold + rel); }
+// パッド：1音につき左右にずらしたノコギリ波2本。ローパスで丸め、ゆっくり立ち上げて残す
+function padAt(t, midi, len) {
+  const f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'lowpass'; f.frequency.setValueAtTime(500, t); f.frequency.linearRampToValueAtTime(1100, t + len * 0.6); f.Q.value = 0.6;
+  env(g, t, 0.7, len - 0.7, 1.4, 0.035);
+  f.connect(g).connect(out);
+  for (const d of [-9, 8]) {
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(midi); o.detune.value = d;
+    wow.connect(o.detune); o.connect(f); o.start(t); o.stop(t + len + 1.5);
+  }
+}
+function bassAt(t, midi, len) {
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.value = mtof(midi); wow.connect(o.detune);
+  env(g, t, 0.02, len, 0.3, 0.32); o.connect(g).connect(out); o.start(t); o.stop(t + len + 0.4);
+}
+// ベル：サイン波と1オクターブ上の三角波。ディレイに送る
+function bellAt(t, midi) {
+  const g = ac.createGain(); env(g, t, 0.005, 0.05, 1.2, 0.07); g.connect(out); g.connect(echo);
+  for (const [m, type] of [[midi, 'sine'], [midi + 12, 'triangle']]) {
+    const o = ac.createOscillator(); o.type = type; o.frequency.value = mtof(m); wow.connect(o.detune);
+    o.connect(g); o.start(t); o.stop(t + 1.4);
+  }
+}
+function kickAt(t) {
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(120, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+  g.gain.setValueAtTime(1, t); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.45);
+  o.connect(g).connect(drums); o.start(t); o.stop(t + 0.5);
+}
+function snareAt(t) {
+  const n = noise(), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.frequency.value = 1500; f.Q.value = 0.8;
+  g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.2);
+  n.connect(f).connect(g).connect(drums); g.connect(echo); n.start(t); n.stop(t + 0.25);
+  const o = ac.createOscillator(), og = ac.createGain(); o.type = 'triangle'; o.frequency.value = 180;
+  og.gain.setValueAtTime(0.3, t); og.gain.exponentialRampToValueAtTime(1e-4, t + 0.08); o.connect(og).connect(drums); o.start(t); o.stop(t + 0.1);
+}
+function hatAt(t, v) {
+  const n = noise(), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'highpass'; f.frequency.value = 6000;
+  g.gain.setValueAtTime(0.09 * v, t); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.04);
+  n.connect(f).connect(g).connect(drums); n.start(t); n.stop(t + 0.06);
+}
+// レコードのプチ音：2ms のノイズ
+function crackleAt(t) {
+  const n = noise(), g = ac.createGain();
+  g.gain.setValueAtTime(0.12 + Math.random() * 0.15, t); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.002 + Math.random() * 0.004);
+  n.connect(g).connect(out); n.start(t); n.stop(t + 0.01);
+}
+// 4小節のコード：Dmaj9 Bm9 Gmaj7 A6
+const CHORDS = [[50, 57, 61, 64, 66], [47, 54, 57, 61, 62], [43, 50, 54, 59, 62], [45, 52, 57, 59, 64]];
+const BELL = [74, 76, 78, 81, 83, 86];   // D のペンタトニック
+function play(step, t) {
+  const bar = Math.floor(step / 16), s = step % 16, b4 = bar % 4, ch = CHORDS[b4];
+  const sw = s % 2 ? ST * 0.18 : 0;   // 裏の16分を少し遅らせて跳ねさせる
+  if (s === 0) {
+    for (const m of ch) padAt(t, m, ST * 16);
+    events.push({ t, type: 'bar', bar });
+  }
+  const root = ch[0] - 12 - (ch[0] > 48 ? 12 : 0);
+  if (s === 0) bassAt(t, root, ST * 5); if (s === 6) bassAt(t, root, ST * 2); if (s === 10) bassAt(t, root + 7, ST * 4);
+  const drop = bar % 8 === 7;   // 8小節目はビートを抜く
+  if (!drop) {
+    if (s === 0 || s === 7 || (s === 10 && Math.random() < 0.6)) { kickAt(t + sw); events.push({ t: t + sw, type: 'kick' }); }
+    if (s === 4 || s === 12) { snareAt(t + sw); events.push({ t: t + sw, type: 'snare' }); }
+    if (s % 2 === 0 || Math.random() < 0.3) hatAt(t + sw, s % 4 === 2 ? 1 : 0.5);
+  }
+  if ([0, 3, 6, 10, 14].includes(s) && Math.random() < 0.35) { bellAt(t + sw, BELL[Math.random() * BELL.length | 0]); events.push({ t: t + sw, type: 'bell' }); }
+  if (Math.random() < 0.3) { crackleAt(t + Math.random() * ST); events.push({ t, type: 'crackle' }); }
+}
+
+// --- 映像 ---
+// 4小節ごとにパレットと描き方（ディザ／線）を替える。つまみは音で動かす
+let origPart = true, mode = 0, kick = 0, snare = 0, bell = 0, crackle = 0, flash = 0;
+const bands = [];   // グリッチでずらす行の帯
+function onEvent(e) {
+  if (e.type === 'bar' && e.bar % 4 === 0) {
+    const k = e.bar / 4;
+    // 交互のときは、偶数の区間は元の色、奇数の区間はパレット（ディザと線を交互、配色も順に替える）
+    origPart = k % 2 === 0; const n = k >> 1;
+    pal = n % PALETTES.length; mode = n % 2; flash = 1;
+    for (let i = 0; i < 6; i++) bands.push(band(40));
+  }
+  if (e.type === 'kick') kick = 1;
+  if (e.type === 'snare') { snare = 1; bands.push(band(12)); if (Math.random() < +document.getElementById('glitch').value * 0.25) roll = LH * (0.04 + Math.random() * 0.12); }   // グリッチが強いほど、スネアで画面が縦に流れやすい
+  if (e.type === 'bell') bell = 1;
+  if (e.type === 'crackle') crackle = 1;
+}
+const band = n => { const r0 = Math.random() * H / 9 | 0; return { r0, r1: r0 + 1 + (Math.random() * n | 0), dx: (Math.random() - 0.5) * 120, life: 3 + (Math.random() * 8 | 0) }; };
+function frame() {
+  requestAnimationFrame(frame);
+  while (ac && events.length && events[0].t <= ac.currentTime) onEvent(events.shift());
+  sample();
+  if (!lum) return;
+  kick *= 0.88; snare *= 0.85; bell *= 0.95; crackle *= 0.7; flash *= 0.85;
+  const t = ac ? ac.currentTime : performance.now() / 1000;
+  const w = ac ? Math.sin(2 * Math.PI * 0.33 * (t - wowT0)) : 0;   // 音のワウと同じ揺れ
+  // 明るさは揺れとキックで、中間調はベルで動かす
+  const gain = 1 + w * 0.12 + kick * 0.35, mid = 0.95 - bell * 0.3;
+  const tone = document.getElementById('tone').value, orig = tone === 'orig' || (tone === 'mix' && origPart);
+  if (tone === 'vhs') {
+    // VHS だけ：崩した 1/3 のコマをなめらかに拡大し、走査線を重ねる
+    ctx.imageSmoothingEnabled = true; ctx.drawImage(grab, 0, 0, W, H);
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 2);
+  } else if (orig) {
+    // 元の色のまま：ドットだけにする。画素の大きさは揺れとキックで動かす
+    ditherColor(Math.round(10 + w * 3 + kick * 8), 1 + w * 0.06 + kick * 0.15, 0.04 + crackle * 0.15);
+  } else if (mode === 0) {
+    // 画素の大きさ：揺れに合わせてゆっくり 7〜13px を行き来し、キックで一瞬粗くなる
+    dither(Math.round(10 + w * 3 + kick * 8), gain, mid, 0.05 + crackle * 0.25);
+  } else {
+    lines(9, gain, mid, t, 1.1 + kick * 1.2, 6 + Math.abs(w) * 10, bands);
+  }
+  for (let i = bands.length - 1; i >= 0; i--) if (--bands[i].life <= 0) bands.splice(i, 1);
+  bloom(tone === 'vhs' ? 0.12 + kick * 0.2 : orig ? 0.15 + kick * 0.15 : 0.75 + kick * 0.5 + flash);   // 元の色のときは光を控えめに
+}
+
+document.getElementById('aspect').onchange = setSize; setSize();
+requestAnimationFrame(frame);
+const setRate = () => { video.playbackRate = +document.getElementById('rate').value; };
+document.getElementById('rate').onchange = setRate;
+document.getElementById('file').onchange = e => { const f = e.target.files[0]; if (f) { video.src = URL.createObjectURL(f); video.play(); } };
+video.onloadeddata = () => { setRate(); video.play(); };
+document.getElementById('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+
+document.getElementById('rec').onclick = e => {
+  startAudio(); step = 0; video.currentTime = 0;
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(window.lastBlob = new Blob(chunks, { type }));
+    a.download = `slowdive_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+</script>
+
+</body>
+</html>

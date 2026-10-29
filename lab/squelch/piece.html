@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Squelch</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="25"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<canvas id="c"></canvas>
+
+<script>
+// フラクタル・フレーム（IFS）の点を数十万個打って糸のような形にし、黒・白・蛍光色の地を拍ごとに切り替える。ハードコア・アシッドで形・光・放射線を動かす
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+const buf = document.createElement('canvas'), bctx = buf.getContext('2d');     // 点の濃さを半分の解像度で塗る
+const glow = document.createElement('canvas'), gctx = glow.getContext('2d');   // 光：縮小してぼかした写し
+const fbk = document.createElement('canvas'), fctx = fbk.getContext('2d');     // 前のフレーム（トンネル状の残像に使う）
+const txc = document.createElement('canvas'), tctx = txc.getContext('2d', { willReadFrequently: true });   // 文字を濃さに書き込むための下書き
+let W, H, BW, BH, D, D2, img, BG, VX, VY, GW, GH;   // D: 点の濃さ（BW×BH）。D2: 移流の書き込み先。VX/VY: 8px 格子の流れ。BG: 白の地の行ごとの明るさ
+const setSize = () => {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  c.width = W; c.height = H; glow.width = W / 4; glow.height = H / 4; fbk.width = W / 2; fbk.height = H / 2;
+  BW = W / 2; BH = H / 2; buf.width = txc.width = BW; buf.height = txc.height = BH;
+  D = new Float32Array(BW * BH); D2 = new Float32Array(BW * BH); img = bctx.createImageData(BW, BH);
+  // 白の地：真ん中が白く、上下に向かって灰色になる
+  GW = (BW >> 3) + 2; GH = (BH >> 3) + 2; VX = new Float32Array(GW * GH); VY = new Float32Array(GW * GH);
+  BG = Float32Array.from({ length: BH }, (_, y) => 1 - 0.4 * Math.abs(y / BH * 2 - 1) ** 1.6);
+};
+
+// --- フラクタル・フレーム ---
+// 3つのアフィン写像に、非線形の変形（線形・正弦・球面・渦・馬蹄）を2つずつ混ぜて掛ける。ランダムに選んだ写像を何度も当てた点の跡が形になる
+let maps = [], cam = { x: 0, y: 0, s: 1 }, nx = 0, ny = 0, fold = 1, mirror = false;   // fold: 回転対称の数。mirror: 左右の鏡
+function vary(k, x, y) {
+  if (k === 0) { nx = x; ny = y; }
+  else if (k === 1) { nx = Math.sin(x); ny = Math.sin(y); }
+  else if (k === 2) { const r = x * x + y * y + 1e-6; nx = x / r; ny = y / r; }
+  else if (k === 3) { const r = x * x + y * y, s = Math.sin(r), q = Math.cos(r); nx = x * s - y * q; ny = x * q + y * s; }
+  else { const r = Math.hypot(x, y) + 1e-6; nx = (x - y) * (x + y) / r; ny = 2 * x * y / r; }
+}
+function step1(p, x, y) {
+  const m = maps[p], ax = m.a * x + m.b * y + m.c, ay = m.d * x + m.e * y + m.f;
+  vary(m.v1, ax, ay); const px = nx, py = ny;
+  vary(m.v2, ax, ay); nx = px + (nx - px) * m.mixE; ny = py + (ny - py) * m.mixE;
+}
+const rnd = () => Math.random() * 2 - 1;
+// 新しい形を作る。点が1か所に縮んだり飛び散ったりする形は捨てて引き直し、残った形の広がりにカメラを合わせる
+let tgt = null, tgtCam = null;   // モーフの行き先
+function newFlame(hard) {
+  const keep = maps;
+  for (let tries = 0; tries < 30; tries++) {
+    maps = Array.from({ length: 3 }, () => ({ a: rnd(), b: rnd(), c: rnd(), d: rnd(), e: rnd(), f: rnd(), v1: Math.random() * 5 | 0, v2: Math.random() * 5 | 0, mix: Math.random() }));
+    maps.forEach((m, i) => { m.c0 = m.c; m.f0 = m.f; m.mixE = m.mix; if (!hard && keep[i]) { m.v1 = keep[i].v1; m.v2 = keep[i].v2; } });   // ゆっくり寄せるときは変形の種類を今のまま
+    let x = rnd(), y = rnd(); const xs = [], ys = [];
+    for (let i = 0; i < 20000; i++) {
+      step1(Math.random() * 3 | 0, x, y); x = nx; y = ny;
+      if (!isFinite(x) || Math.abs(x) > 1e4 || Math.abs(y) > 1e4) { x = rnd(); y = rnd(); continue; }
+      if (i > 20) { xs.push(x); ys.push(y); }
+    }
+    if (xs.length < 15000) continue;
+    xs.sort((a, b) => a - b); ys.sort((a, b) => a - b);
+    const q = (a, p) => a[a.length * p | 0], sx = q(xs, 0.95) - q(xs, 0.05), sy = q(ys, 0.95) - q(ys, 0.05);
+    if (!(sx > 0.05 && sy > 0.05)) continue;
+    cam = { x: q(xs, 0.5), y: q(ys, 0.5), s: 1 / Math.max(sx, sy) };
+    fold = [1, 1, 2, 3, 4, 6][Math.random() * 6 | 0]; mirror = Math.random() < 0.5;
+    if (fold > 1) { cam.x = cam.y = 0; cam.s *= 0.7; }   // 対称のときは原点を中心に回す
+    break;
+  }
+  if (hard) { tgt = maps; tgtCam = { ...cam }; return; }
+  // ゆっくり寄せる：行き先だけ覚えて、今の形と対称の数に戻す
+  tgt = maps; tgtCam = cam; maps = keep.map(m => ({ ...m })); cam = { ...camNow }; fold = foldNow; mirror = mirrorNow;
+}
+let camNow, foldNow, mirrorNow;
+// 毎フレーム、今の形の係数を行き先へ少しずつ寄せる
+const KEYS = ['a', 'b', 'd', 'e', 'c0', 'f0', 'mix'];
+function morph(rate) {
+  if (!tgt) return;
+  maps.forEach((m, i) => { for (const k of KEYS) m[k] += (tgt[i][k] - m[k]) * rate; });
+  for (const k of ['x', 'y', 's']) cam[k] += (tgtCam[k] - cam[k]) * rate;
+}
+// 点の群れ：2000個がそれぞれ写像を当て続ける。毎フレーム 1個あたり iters 回打つ
+const N = 2000, PX = Float32Array.from({ length: N }, rnd), PY = Float32Array.from({ length: N }, rnd);
+function plotFlame(iters, ang, zoom) {
+  const k = cam.s * zoom * BH * 0.55, cx = BW / 2, cy = BH / 2, copies = fold * (mirror ? 2 : 1);
+  const RC = [], RS = [];
+  for (let j = 0; j < fold; j++) { RC.push(Math.cos(ang + j * Math.PI * 2 / fold)); RS.push(Math.sin(ang + j * Math.PI * 2 / fold)); }
+  iters = Math.ceil(iters / copies);   // 写しの数で割って、打つ点の総数をそろえる
+  for (let n = 0; n < N; n++) {
+    let x = PX[n], y = PY[n];
+    for (let i = 0; i < iters; i++) {
+      step1(Math.random() * 3 | 0, x, y); x = nx; y = ny;
+      if (!isFinite(x) || Math.abs(x) > 1e4 || Math.abs(y) > 1e4) { x = rnd(); y = rnd(); continue; }
+      const dx = x - cam.x, dy = y - cam.y;
+      for (let j = 0; j < fold; j++) {
+        const rx = (dx * RC[j] - dy * RS[j]) * k, ry = (dx * RS[j] + dy * RC[j]) * k, sy = cy + ry | 0;
+        if (sy < 0 || sy >= BH) continue;
+        let sx = cx + rx | 0; if (sx >= 0 && sx < BW) D[sy * BW + sx] += 1;
+        if (mirror) { sx = cx - rx | 0; if (sx >= 0 && sx < BW) D[sy * BW + sx] += 1; }
+      }
+    }
+    PX[n] = x; PY[n] = y;
+  }
+}
+// 放射線：中心から何本もの線を画面の外まで伸ばし、まわりに点を散らす
+function rays(count, pts) {
+  const cx = BW / 2, cy = BH / 2, R = Math.hypot(BW, BH) * 0.6;
+  for (let j = 0; j < count; j++) {
+    const th = Math.random() * Math.PI * 2, ca = Math.cos(th), sa = Math.sin(th), w = 0.004 + Math.random() * 0.02;
+    for (let i = 0; i < pts; i++) {
+      const r = R * Math.random() ** 1.8, o = r * w * (Math.random() + Math.random() - 1);
+      const sx = cx + ca * r - sa * o | 0, sy = cy + sa * r + ca * o | 0;
+      if (sx >= 0 && sx < BW && sy >= 0 && sy < BH) D[sy * BW + sx] += 2;
+    }
+  }
+}
+// ちり：画面全体にまばらな点
+function dust(n) { for (let i = 0; i < n; i++) D[Math.random() * D.length | 0] += 1 + Math.random() * 3; }
+
+// 色：アシッドの蛍光3組を4小節ごとに替える。hot は黒の地で光る色、ink は白の地のインク、flood は塗りつぶしの地
+const PALETTES = [
+  { hot: [190, 255, 0], ink: [30, 80, 0], flood: [200, 255, 0], css: ['#beff00', '#1e5000', '#000'] },     // ライム
+  { hot: [255, 0, 170], ink: [90, 0, 70], flood: [255, 0, 150], css: ['#ff00aa', '#5a0046', '#000'] },     // マゼンタ
+  { hot: [0, 220, 255], ink: [0, 50, 90], flood: [0, 200, 255], css: ['#00dcff', '#00325a', '#000'] },     // シアン
+];
+let pal = 0;
+// 流体：濃さを流れ場に乗せて運ぶ（セミラグランジュ法の移流）。流れ場は時間で動く流れ関数 psi の回転（curl）なので、渦が湧いては消え、点が溜まらず流れる
+// amt は渦の速さ、push はキックで中心から外へ押す強さ、decay は1フレームで残す割合
+function advect(t, amt, push, decay) {
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    const x = gx * 8 / BW, y = gy * 8 / BH, a1 = x * 6 + t * 0.9, b1 = y * 5 - t * 0.6, a2 = x * 13 - y * 9 + t * 1.7;
+    const dpx = 6 * Math.cos(a1) * Math.cos(b1) + 6.5 * Math.cos(a2), dpy = -5 * Math.sin(a1) * Math.sin(b1) - 4.5 * Math.cos(a2);
+    const g = gy * GW + gx;
+    VX[g] = dpy * amt + (x - 0.5) * push; VY[g] = -dpx * amt + (y - 0.5) * push;
+  }
+  for (let y = 0, i = 0; y < BH; y++) {
+    const fy = y / 8, gy = fy | 0, ty = fy - gy;
+    for (let x = 0; x < BW; x++, i++) {
+      const fx = x / 8, gx = fx | 0, tx = fx - gx, g = gy * GW + gx;
+      const vx = (VX[g] * (1 - tx) + VX[g + 1] * tx) * (1 - ty) + (VX[g + GW] * (1 - tx) + VX[g + GW + 1] * tx) * ty;
+      const vy = (VY[g] * (1 - tx) + VY[g + 1] * tx) * (1 - ty) + (VY[g + GW] * (1 - tx) + VY[g + GW + 1] * tx) * ty;
+      // 流れをさかのぼった位置の濃さを、まわり4点から読む
+      const sx = Math.min(BW - 2, Math.max(0, x - vx)), sy = Math.min(BH - 2, Math.max(0, y - vy));
+      const ix = sx | 0, iy = sy | 0, ux = sx - ix, uy = sy - iy, j = iy * BW + ix;
+      D2[i] = ((D[j] * (1 - ux) + D[j + 1] * ux) * (1 - uy) + (D[j + BW] * (1 - ux) + D[j + BW + 1] * ux) * uy) * decay;
+    }
+  }
+  [D, D2] = [D2, D];
+}
+
+// 文字：画面の幅いっぱいに引き伸ばして描く。E が増えるほど字が詰まる
+const FONT = 'Impact, "Arial Black", sans-serif';
+function fitText(g, txt, w, h) {
+  g.save(); g.font = `${h}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  const tw = g.measureText(txt).width; g.translate(w / 2, h * 0); g.scale(w * 0.94 / tw, 1);
+  g.fillText(txt, 0, 0); g.restore();
+}
+// 文字を濃さのバッファに書き込む。流体に流されて溶けていく
+function stamp(txt, amt) {
+  tctx.clearRect(0, 0, BW, BH); tctx.fillStyle = '#fff';
+  tctx.save(); tctx.translate(0, BH / 2); fitText(tctx, txt, BW, BH * 0.2); tctx.restore();
+  const a = tctx.getImageData(0, 0, BW, BH).data;
+  for (let i = 0; i < D.length; i++) if (a[i * 4 + 3]) D[i] += a[i * 4 + 3] / 255 * amt;
+}
+// 重ねて出す文字。色は地に合わせて、赤・青のずれを付ける
+let shout = '', shoutLife = 0;
+function drawShout(md) {
+  if (shoutLife <= 0) return;
+  const h = H * 0.2, fg = md === 0 ? '#fff' : md === 1 ? PALETTES[pal].css[1] : '#000';
+  ctx.save(); ctx.translate(0, H / 2);
+  if (md === 0) {
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = PALETTES[pal].css[0]; ctx.save(); ctx.translate(-10 - kick * 20, 0); fitText(ctx, shout, W, h); ctx.restore();
+  }
+  ctx.fillStyle = fg; fitText(ctx, shout, W, h);
+  ctx.restore(); shoutLife--;
+}
+
+// 濃さを色にする。mode 0：黒の地に蛍光色から白へ光る / 1：白の地にインクが沈む / 2：蛍光色の地に暗い点
+function tonemap(mode, expo) {
+  const px = img.data, { hot, ink, flood } = PALETTES[pal];
+  for (let y = 0, i = 0; y < BH; y++) {
+    const bg = BG[y];
+    for (let x = 0; x < BW; x++, i++) {
+      const v = 1 - Math.exp(-D[i] * expo), p = i * 4;
+      if (mode === 0) {
+        const a = Math.min(1, v * 2.2), w = 255 * Math.max(0, v * 1.6 - 0.6) ** 1.5;
+        for (let k = 0; k < 3; k++) px[p + k] = hot[k] * a + w;
+      } else if (mode === 1) {
+        const a = Math.min(1, v * 2.5), b = 1 - 0.7 * Math.max(0, v * 1.5 - 0.5);   // 薄いところは淡く、濃いところは暗く
+        for (let k = 0; k < 3; k++) px[p + k] = (255 * bg + (ink[k] - 255 * bg) * a) * b;
+      } else {
+        const d = (0.6 + 0.4 * bg) * (1 - 0.9 * v);
+        for (let k = 0; k < 3; k++) px[p + k] = flood[k] * d;
+      }
+      px[p + 3] = 255;
+    }
+  }
+  bctx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(buf, 0, 0, W, H);
+}
+function bloom(strength) {
+  gctx.filter = 'blur(6px)'; gctx.globalCompositeOperation = 'copy';
+  gctx.drawImage(c, 0, 0, glow.width, glow.height);
+  ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = strength;
+  ctx.drawImage(glow, 0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+
+// トンネル：前のフレームを少し大きく回して足し、残像を外へ流す
+function feedback(scale, rot, alpha) {
+  ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = alpha;
+  ctx.translate(W / 2, H / 2); ctx.rotate(rot); ctx.scale(scale, scale);
+  ctx.drawImage(fbk, -W / 2, -H / 2, W, H); ctx.restore();
+}
+// ずらし：横の帯を何本か左右に切ってずらす
+function slit(n, amt) {
+  for (let i = 0; i < n; i++) {
+    const y = Math.random() * H | 0, h = 4 + Math.random() * 60 | 0;
+    ctx.drawImage(c, 0, y, W, h, (Math.random() - 0.5) * amt, y, W, h);
+  }
+}
+// 文字と波形：四隅に小さな計器を出す。地に合わせて色を反転させる
+function hud(md, bar, s, cutHz, wave) {
+  const fg = PALETTES[pal].css[md];
+  ctx.fillStyle = ctx.strokeStyle = fg; ctx.font = `${W / 40 | 0}px ui-monospace, Menlo, monospace`;
+  const m = W / 30, lh = W / 32;
+  ctx.textAlign = 'left';
+  ctx.fillText('SQUELCH // ACID 303', m, m + lh);
+  ctx.fillText(`${BPM} BPM  ${String(bar % 100).padStart(2, '0')}:${String(s).padStart(2, '0')}`, m, m + lh * 2);
+  ctx.textAlign = 'right';
+  ctx.fillText(`CUTOFF ${cutHz | 0}Hz`, W - m, m + lh);
+  ctx.fillText(`FOLD ${fold}${mirror ? ' M' : ''}`, W - m, m + lh * 2);
+  if (!wave) return;
+  ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = 0; i < wave.length; i += 4) { const x = m + (W - m * 2) * i / wave.length, y = H - m * 2.5 + (wave[i] - 128) * H / 2000; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  ctx.stroke();
+  for (let i = 0; i < 16; i++) ctx.fillRect(m + i * (W - m * 2) / 16, H - m * 1.2, (W - m * 2) / 16 - 4, i === s ? lh * 0.5 : 2);   // 16分の位置
+}
+
+// --- 音 ---
+// 155BPM のハードコア・アシッド。歪ませた太いキック、裏のオープンハット、2・4拍目のクラップ、
+// 1台の 303 風アシッド（ノコギリ波＋共振の強いローパス、アクセントとスライド）を歪ませて鳴らす。カットオフは8小節でゆっくり開閉する
+const BPM = 155, ST = 60 / BPM / 4, events = [];
+let step = 0;   // 録画のときは 0 に戻して、曲の頭から録る
+let ac, out, audioDest, kbus, drums, echo, noiseBuf, acid, analyser, wave;
+const mtof = m => 440 * 2 ** ((m - 69) / 12);
+const shaper = drive => { const s = ac.createWaveShaper(); s.curve = Float32Array.from({ length: 2048 }, (_, i) => Math.tanh((i / 1023.5 - 1) * drive) / Math.tanh(drive)); return s; };
+function startAudio() {
+  if (ac) return ac.resume();
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -12; comp.ratio.value = 6; comp.attack.value = 0.003;
+  out = ac.createGain(); out.gain.value = 0.45;
+  out.connect(shaper(1.5)).connect(comp);
+  comp.connect(ac.destination); comp.connect(audioDest = ac.createMediaStreamDestination());
+  comp.connect(analyser = ac.createAnalyser()); analyser.fftSize = 1024; wave = new Uint8Array(1024);
+
+  // キック：強く歪ませて、上をローパスで丸める（ガバ寄りの太いキック）
+  kbus = ac.createGain();
+  const kl = ac.createBiquadFilter(); kl.type = 'lowpass'; kl.frequency.value = 4500;
+  kbus.connect(shaper(9)).connect(kl).connect(out);
+  // ランブル：歪んだキックを長いリバーブに通し、150Hz 以下だけ残す（ハードテクノの地鳴り）
+  const ir = ac.createBuffer(2, ac.sampleRate * 1.4, ac.sampleRate);
+  for (let k = 0; k < 2; k++) { const d = ir.getChannelData(k); for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 2; }
+  const cv = ac.createConvolver(), rl = ac.createBiquadFilter(), rg = ac.createGain();
+  cv.buffer = ir; rl.type = 'lowpass'; rl.frequency.value = 150; rg.gain.value = 0.9;
+  kl.connect(cv).connect(rl).connect(shaper(3)).connect(rg).connect(out);
+  drums = ac.createGain(); drums.connect(out);
+
+  // アシッドのディレイ（付点8分）
+  echo = ac.createDelay(1); echo.delayTime.value = ST * 3;
+  const fb = ac.createGain(); fb.gain.value = 0.35;
+  const ef = ac.createBiquadFilter(); ef.type = 'bandpass'; ef.frequency.value = 1200;
+  echo.connect(ef).connect(fb).connect(echo); ef.connect(out);
+
+  // アシッド：ずっと鳴っている1台の声を、16分ごとに音程・フィルター・音量で操る
+  const o = ac.createOscillator(), f = ac.createBiquadFilter(), vca = ac.createGain(), hp = ac.createBiquadFilter(), ag = ac.createGain();
+  o.type = 'sawtooth'; f.type = 'lowpass'; f.Q.value = 16; vca.gain.value = 0; hp.type = 'highpass'; hp.frequency.value = 90; ag.gain.value = 0.32;
+  o.connect(f).connect(vca).connect(shaper(4)).connect(hp).connect(ag); ag.connect(out);
+  const send = ac.createGain(); send.gain.value = 0.25; ag.connect(send).connect(echo);
+  o.start(); acid = { o, f, vca };
+
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+
+  let next = ac.currentTime + 0.1;
+  setInterval(() => { while (next < ac.currentTime + 0.2) { play(step++, next); next += ST; } }, 25);
+}
+const noise = () => { const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true; s.loopStart = Math.random(); return s; };
+function kickAt(t) {
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(320, t); o.frequency.exponentialRampToValueAtTime(55, t + 0.045); o.frequency.exponentialRampToValueAtTime(42, t + 0.3);
+  g.gain.setValueAtTime(1, t); g.gain.setValueAtTime(1, t + 0.12); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.34);
+  o.connect(g).connect(kbus); o.start(t); o.stop(t + 0.36);
+}
+function hit(t, type, freq, q, v, len) {
+  const n = noise(), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = type; f.frequency.value = freq; f.Q.value = q;
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(1e-4, t + len);
+  n.connect(f).connect(g).connect(drums); n.start(t); n.stop(t + len + 0.02);
+}
+// クラップ：帯域ノイズを 10ms おきに3回、最後だけ長く
+function clapAt(t, v = 1) { for (let i = 0; i < 3; i++) hit(t + i * 0.01, 'bandpass', 1300, 1.2, 0.6 * v, i < 2 ? 0.012 : 0.16); }
+// アシッドの1音。スライドのときは音程をなめらかに移し、音を切らずに次へつなぐ
+let lastSlide = false;
+function acidAt(t, midi, acc, slide, cut) {
+  const { o, f, vca } = acid, peak = cut * (acc ? 4.5 : 2.6) + 300;
+  if (lastSlide) o.frequency.setTargetAtTime(mtof(midi), t, 0.025); else o.frequency.setValueAtTime(mtof(midi), t);
+  f.frequency.cancelScheduledValues(t); f.frequency.setValueAtTime(peak, t); f.frequency.setTargetAtTime(cut, t + 0.005, acc ? 0.09 : 0.06);
+  vca.gain.cancelScheduledValues(t); vca.gain.setTargetAtTime(acc ? 1 : 0.65, t, 0.003);
+  if (!slide) vca.gain.setTargetAtTime(0, t + ST * 0.6, 0.012);
+  lastSlide = slide;
+}
+// 1小節のアシッドの型。-1 は休み。x はアクセント、s は次の音へスライド
+const PAT = [
+  { n: [36, 36, 48, 36, 39, 36, -1, 36, 46, 36, 48, 36, 43, -1, 36, 51], a: 'x..x..x...x..x.x', s: '..s.....s.....s.' },
+  { n: [36, 48, 36, 36, 48, 46, 36, 43, 36, 48, -1, 36, 51, 48, 46, 43], a: 'x.x...x.x..xx..x', s: '.s...s....s..s..' },
+  { n: [36, 36, 36, 60, 36, 36, 58, 36, 36, 63, 36, 36, 60, 36, 55, 58], a: '...x..x..x..x.xx', s: '..s...s..s..s...' },
+  { n: [41, 41, 53, 41, 39, 51, 39, 36, 48, 36, 46, 48, 36, 48, 51, 53], a: 'x..x.x..x.x..x.x', s: '.s.s.....s...ss.' },
+];
+function play(step, t) {
+  const bar = Math.floor(step / 16), s = step % 16, b8 = bar % 8, roll = b8 === 7;
+  if (s === 0) events.push({ t, type: 'bar', bar });
+  // カットオフ：8小節で閉→開→閉。抜きの小節（8小節目）は開いていく
+  const ph = (b8 * 16 + s) / 128, cut = roll ? 600 + 3800 * (s / 16) : 180 + 2600 * (0.5 - 0.5 * Math.cos(ph * Math.PI * 2)) ** 1.4;
+  const p = PAT[[0, 0, 2, 0, 1, 1, 3, 1][Math.floor(bar / 2) % 8]], m = p.n[s], acc = p.a[s] === 'x';
+  if (m >= 0) { acidAt(t, m, acc, p.s[s] === 's', cut); events.push({ t, type: 'acid', acc, cut: Math.min(1, cut / 3000) }); }
+  else { acid.vca.gain.setTargetAtTime(0, t, 0.01); lastSlide = false; }
+  if (!roll) {
+    if (s % 4 === 0) { kickAt(t); events.push({ t, type: 'kick', s }); }
+    if (s === 4 || s === 12) { clapAt(t); events.push({ t, type: 'clap' }); }
+    if (s % 4 === 2) { hit(t, 'highpass', 8000, 0.7, 0.22, 0.12); events.push({ t, type: 'hat' }); }   // 裏のオープンハット
+    else hit(t, 'highpass', 10000, 0.7, s % 2 ? 0.05 : 0.08, 0.03);
+    if (bar % 16 >= 8 && s % 4 === 2) hit(t, 'bandpass', 6500, 3, 0.12, 0.4);   // 後半はライドを足す
+    if (b8 === 6 && s >= 12) { kickAt(t); events.push({ t, type: 'kick', s }); }   // 抜きの前の小節の終わりはキックを16分で詰める
+  } else {
+    // 抜きの小節：キックを止め、クラップを16分で連打して大きくしていく
+    clapAt(t, 0.15 + 0.85 * s / 15); events.push({ t, type: 'roll', s });
+  }
+  if (s === 0 && b8 === 0) { hit(t, 'highpass', 5000, 0.5, 0.35, 1.4); events.push({ t, type: 'crash' }); }
+}
+
+// --- 映像 ---
+// 1小節ごとに地（黒・白・赤）を替え、4小節ごとに形を引き直す。抜きの小節は赤の地で寄っていく
+// 1文字が1拍。0 黒 / 1 白 / 2 赤。抜きの小節（8小節目）は16分ごとに点滅する
+const MODES = ['0001', '0100', '0010', '1010', '0001', '0120', '0101', '', '0010', '1001', '0100', '1212', '0001', '0110', '1010', ''];
+let mode = 0, barT0 = 0, curBar = 0, curS = 0, cutHz = 0, kick = 0, clap = 0, acc = 0, hat = 0, cut = 0.3, zoomIn = 0, ang = 0, flash = 0, invert = 0;
+function onEvent(e) {
+  if (e.type === 'bar') {
+    curBar = e.bar; barT0 = e.t; zoomIn = 0;
+    if (e.bar % 4 === 0) { newFlame(true); D.fill(0); pal = e.bar / 4 % PALETTES.length; }
+    else if (e.bar % 4 === 2) { camNow = cam; foldNow = fold; mirrorNow = mirror; newFlame(false); }   // 2小節かけて別の形へ溶けていく
+    if (e.bar % 4 === 1 || e.bar % 4 === 3) fold = [1, 2, 3, 5, 6][Math.random() * 5 | 0];   // 対称の数を替える
+  }
+  if (e.type === 'kick') {
+    kick = 1; const mm = MODES[curBar % 16]; if (mm) mode = +mm[e.s / 4 | 0];
+    if (e.s === 0) rays(10 + Math.random() * 10 | 0, 2500);
+  }
+  if (e.type === 'clap') { clap = 1; ang += (Math.random() - 0.5) * 0.15; if (mode === 0 && Math.random() < 0.35) invert = 2; }
+  if (e.type === 'hat') hat = 1;
+  if (e.type === 'acid') { cut = e.cut; cutHz = e.cut * 3000; if (e.acc) acc = 1; }
+  if (e.type === 'roll') {
+    clap = 1; zoomIn = e.s / 15; mode = [2, 0, 1, 0][e.s % 4];
+    // A → AC → ACI → ACIE… と1打ごとに伸ばす
+    shout = 'ACIE'.slice(0, Math.min(4, e.s + 1)) + 'E'.repeat(Math.max(0, e.s - 3)) + (e.s === 15 ? 'D' : ''); shoutLife = 8;
+    stamp(shout, 4);
+  }
+  if (e.type === 'crash') { flash = 1; rays(30, 4000); shout = 'ACID'; shoutLife = 14; stamp('ACID', 20); }
+  if (e.type === 'kick' && e.s === 0 && curBar % 8 === 4) stamp('ACID', 12);   // 5小節目の頭：流体に書くだけ
+}
+function frame() {
+  requestAnimationFrame(frame);
+  while (ac && events.length && events[0].t <= ac.currentTime) onEvent(events.shift());
+  if (!D) return;
+  kick *= 0.85; clap *= 0.8; acc *= 0.8; hat *= 0.7; flash *= 0.9;
+  const t = ac ? ac.currentTime : performance.now() / 1000;
+  // 形をゆらす：カットオフが開くほど大きく、アクセントで一瞬ふるえる
+  morph(0.02);
+  maps.forEach((m, i) => {
+    m.mixE = m.mix + (1 - m.mix) * cut * 0.9;   // フィルターが開くほど2つ目の変形が強くなる
+    m.c = m.c0 + Math.sin(t * 0.5 + i * 2) * (0.1 + cut * 0.45) + (Math.random() - 0.5) * acc * 0.06;
+    m.f = m.f0 + Math.cos(t * 0.37 + i) * (0.1 + cut * 0.45);
+  });
+  ang += 0.0005 + cut * 0.002;
+  // 前のフレームの濃さを流れに乗せて運び、少し薄めて残す。カットオフが開くほど速く流れる
+  advect(t * (0.6 + cut), 0.3 + cut * 0.9, kick * 28 + zoomIn * 10, 0.8);
+  plotFlame(90, ang, 1 + kick * 0.18 + zoomIn * 1.5);
+  dust(mode === 0 ? 300 : 2500 + hat * 6000);
+  let md = mode;
+  if (invert > 0) { md = 1; invert--; }
+  if (flash > 0.5) md = 2;
+  tonemap(md, (md === 0 ? 0.05 : 0.2) * (1 + kick * 0.8 + acc * 0.5));
+  if (md === 0) { feedback(1.04 + kick * 0.06, 0.01 + cut * 0.03, 0.22); bloom(0.3 + kick * 0.4 + acc * 0.3); }
+  if (md === 0) fctx.drawImage(c, 0, 0, fbk.width, fbk.height); else { fctx.fillStyle = '#000'; fctx.fillRect(0, 0, fbk.width, fbk.height); }
+  if (acc > 0.5 || clap > 0.7) slit(3 + acc * 8 | 0, 80 + acc * 200);
+  if (ac) { analyser.getByteTimeDomainData(wave); curS = Math.min(15, Math.max(0, (t - barT0) / ST | 0)); }
+  drawShout(md);
+  hud(md, curBar, curS, cutHz, ac && wave);
+}
+
+setSize(); newFlame(true); frame();
+document.getElementById('aspect').onchange = setSize;
+document.getElementById('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+
+document.getElementById('rec').onclick = e => {
+  startAudio(); step = 0;
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(window.lastBlob = new Blob(chunks, { type }));
+    a.download = `squelch_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+</script>
+</body>
+</html>

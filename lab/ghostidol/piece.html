@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ghost Idol</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <label>動画（1本に差し替え） <input type="file" id="file" accept="video/*"></label>
+  <select id="rate">
+    <option value="1" selected>速さ 1倍</option>
+    <option value="0.5">速さ 0.5倍</option>
+  </select>
+  <label>RGB のずれ <input type="range" id="rgb" min="0" max="1" step="0.05" value="0.5"></label>
+  <label>グリッチの強さ <input type="range" id="glitch" min="0" max="1" step="0.05" value="0.8"></label>
+  <label>連続コピーの濃さ <input type="range" id="copy" min="0" max="1" step="0.05" value="0.6"></label>
+  <label><input type="checkbox" id="text" checked> カラオケの歌詞と VHS の表示</label>
+  <div id="msg"></div>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="90" value="64"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<canvas id="c"></canvas>
+
+<script>
+// 存在しない K-POP ガールズグループ「ILLUSIA（일루시아）」の MV を、weirdcore の人が VHS に録って崩したような映像。
+// 動画に VHS のグリッチをかけ、鏡・タイル・連続コピー（前のコマを縮めて重ねる）・止め・巻き戻し・ブロックずれ・反転をガバのビートに合わせて切り替える
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+const glow = document.createElement('canvas'), gctx = glow.getContext('2d');     // 光：縮小してぼかした写し
+const prev = document.createElement('canvas'), pctx = prev.getContext('2d');     // 連続コピー：前のコマの写し（半分の大きさ）
+const msg = document.getElementById('msg');
+// 素材の動画4本を同時に流しておき、2小節ごとに切り替える（1本につないでシークすると、キーフレームが遠くて止まる）
+const vids = ['cosmos', 'rooftop', 'stage', 'practice'].map(n => Object.assign(document.createElement('video'), { src: `src/${n}_v1.mp4`, muted: true, loop: true, playsInline: true }));
+let video = vids[0];
+const grab = document.createElement('canvas'), gr = grab.getContext('2d', { willReadFrequently: true });
+const melt = document.createElement('canvas'), mctx = melt.getContext('2d');     // 溶かしたコマ（grab と同じ大きさ）
+const $ = id => document.getElementById(id);
+let W, H, LW = 0, LH = 0, ok = false, lum = new Float32Array(0);   // lum: 崩したコマの明るさ（輪郭の落書きに使う）
+const setSize = () => {
+  [W, H] = $('aspect').value.split('x').map(Number);
+  c.width = W; c.height = H; glow.width = W / 4; glow.height = H / 4; prev.width = W / 2; prev.height = H / 2;
+};
+// 動画の今のコマを画面いっぱいに切り抜いて 1/3 に縮め、VHS 風に崩す
+function sample() {
+  if (!W || video.readyState < 2) return;
+  LW = W / 3 | 0; LH = H / 3 | 0;
+  if (grab.width !== LW || grab.height !== LH) { grab.width = LW; grab.height = LH; }
+  track();
+  const vw = video.videoWidth, vh = video.videoHeight, s0 = Math.max(LW / vw, LH / vh), z = cam.z * (1 + kick * 0.06);   // キックで一瞬寄る
+  crop.w = LW / s0 / z; crop.h = LH / s0 / z;
+  crop.x = Math.min(vw - crop.w, Math.max(0, cam.x - crop.w / 2)); crop.y = Math.min(vh - crop.h, Math.max(0, cam.y - crop.h / 2));
+  gr.drawImage(video, crop.x, crop.y, crop.w, crop.h, 0, 0, LW, LH);
+  let im;
+  try { im = gr.getImageData(0, 0, LW, LH); }
+  catch (e) { msg.textContent = 'file:// では動画の画素を読めないので、「動画」から mp4 を選んでください'; ok = false; return; }
+  msg.textContent = ''; ok = true;
+  vhs(im.data); gr.putImageData(im, 0, 0);
+  const d = im.data; if (lum.length !== LW * LH) lum = new Float32Array(LW * LH);
+  for (let i = 0; i < lum.length; i++) lum[i] = (d[i * 4] * 0.3 + d[i * 4 + 1] * 0.59 + d[i * 4 + 2] * 0.11) / 255;
+}
+
+// --- 溶かす ---
+// grab を 2px の横の帯に切り、帯ごとに左右へずらし横に伸ばす。ずれは画面の真ん中（顔のあたり）ほど大きく、波は下へ流れる。
+// Weirdcore が Aphex Twin の映像でやる、顔が液体のように崩れる感じ
+function meltFrame(amt, t, mono) {
+  if (melt.width !== LW || melt.height !== LH) { melt.width = LW; melt.height = LH; }
+  mctx.filter = mono ? 'grayscale(1) contrast(1.5) brightness(0.7)' : 'none';   // 白黒の区間は暗視カメラのように
+  mctx.drawImage(grab, 0, 0);
+  if (amt <= 0.01) return;
+  for (let y = 0; y < LH; y += 2) {
+    const v = y / LH - 0.4, bump = Math.exp(-v * v * 12);
+    const dx = Math.sin(y * 0.05 - t * 9) * amt * LW * 0.12 * bump, sw = 1 + amt * 0.3 * bump;
+    mctx.drawImage(grab, 0, y, LW, 2, (LW - LW * sw) / 2 + dx, y, LW * sw, 2);
+  }
+}
+// --- 輪郭の落書き ---
+// 明るさの傾きが急なところ（輪郭）に、輪郭に沿った短い白い線をばらつかせて引く。3コマごとに引き直すので線が震える
+let scrib = null, scribN = 0;
+function scribble(amt) {
+  if (scribN++ % 3 === 0 || !scrib) {
+    scrib = new Path2D(); const k = W / LW, th = 0.22 - amt * 0.08;
+    for (let y = 2; y < LH - 2; y += 3) for (let x = 2; x < LW - 2; x += 3) {
+      const i = y * LW + x, gx = lum[i + 2] - lum[i - 2], gy = lum[i + 2 * LW] - lum[i - 2 * LW], m = Math.hypot(gx, gy);
+      if (m < th || Math.random() > 0.55) continue;
+      const tx = -gy / m, ty = gx / m, L = (6 + Math.random() * 14) * k / 3, j = () => (Math.random() - 0.5) * 6 * k / 3;
+      const X = x * k + j(), Y = y * k + j();
+      scrib.moveTo(X - tx * L, Y - ty * L); scrib.lineTo(X + j(), Y + j()); scrib.lineTo(X + tx * L, Y + ty * L);
+    }
+  }
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5 * W / 1080; ctx.lineJoin = 'miter'; ctx.stroke(scrib);
+}
+
+// --- データモッシュ ---
+// 新しいコマを描かず、前のコマを 48px のブロックごとにずらして写し直す（I フレームが抜けて動きだけが残る感じ）。
+// ずれの向きはブロックごとの場で、キックで向きを替える。新しいコマはうっすらにじませ、最後に青〜マゼンタで色を付ける（How Sweet の色）
+const MB = 48; let moshSeed = 0;
+function mosh(t) {
+  const B = MB * W / 1080;
+  for (let by = 0; by < H; by += B) for (let bx = 0; bx < W; bx += B) {
+    const a = Math.sin(bx * 0.004 + moshSeed) + Math.cos(by * 0.003 - moshSeed * 1.3);
+    if (Math.abs(a) < 0.5) continue;   // 止まっているブロックは前のコマのまま
+    const fx = Math.sin(by * 0.01 + moshSeed * 2) * B * 0.5 * a, fy = Math.cos(bx * 0.01 + moshSeed) * B * 0.35 * a;
+    ctx.drawImage(prev, (bx - fx) / 2, (by - fy) / 2, B / 2, B / 2, bx, by, B, B);
+  }
+  ctx.globalAlpha = 0.1; ctx.drawImage(melt, 0, 0, W, H); ctx.globalAlpha = 1;
+  // 生の映像の窓：崩れた画面の中に、四角く切り抜いた今のコマを開ける（Weirdcore の RGB2CMY）。キックで場所が替わる
+  if (win) { const [x, y, w, h] = win; ctx.drawImage(melt, x / 3, y / 3, w / 3, h / 3, x, y, w, h); }
+}
+let win = null;
+function tint(a) {
+  const g = ctx.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#2a1cff'); g.addColorStop(1, '#ff1cc8');
+  ctx.globalCompositeOperation = 'color'; ctx.globalAlpha = a; ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+
+// ピクセルの引き伸ばし：ある列（行）の1px を、そこから画面の端まで引き伸ばす
+function stretch(s) {
+  if (s.vert) ctx.drawImage(c, 0, s.p, W, 1, 0, s.p, W, H - s.p);
+  else ctx.drawImage(c, s.p, 0, 1, H, s.p, 0, W - s.p, H);
+}
+
+// --- VHS ---
+// 2026-11-04 slowdive と同じ。行のずれ・トラッキングの帯・色のにじみ・色調・RGB のずれ。揺れはテープのワウの代わりに 0.5Hz の正弦波
+let Yr = new Float32Array(0), Ir = Yr, Qr = Yr, Rr = Yr, Br = Yr, roll = 0;
+function vhs(d) {
+  if (Yr.length !== LW) [Yr, Ir, Qr, Rr, Br] = [0, 0, 0, 0, 0].map(() => new Float32Array(LW));
+  const G = +$('glitch').value, t = now(), w = Math.sin(Math.PI * t);
+  const bh = LH * (0.02 + 0.02 * G);   // トラッキングの帯の高さ
+  const bands = [((t * 0.12) % 1.4 - 0.2) * LH]; if (G > 0.5) bands.push(((t * 0.31 + 0.5) % 1.4 - 0.2) * LH);
+  const R = 4 + Math.round(G * 3), CS = 2 + Math.round(G * 3);   // 色のぼかしの半径と、色のずれ（マス）
+  const S = +$('rgb').value, split0 = S * 5 + kick * S * 8;   // RGB のずれ（マス、1マス3px）。キックで広がる
+  const shake = 1 + G * 1.2, noise = 0.05 + G * 0.06;
+  roll *= 0.85; const ro = Math.round(roll);
+  for (let y = 0; y < LH; y++) {
+    const inBand = bands.some(b => Math.abs(y - b) < bh);
+    const off = Math.round(Math.sin(y * 0.04 + t * 2.5) * (0.6 + Math.abs(w)) * shake + kick * (Math.random() * 6 - 3) * shake + (inBand ? (Math.random() - 0.5) * (12 + 16 * G) : 0));
+    const r = y * LW, src = ((y + ro) % LH) * LW;
+    for (let x = 0; x < LW; x++) {
+      const i = (src + Math.min(LW - 1, Math.max(0, x - off))) * 4, R0 = d[i] / 255, G0 = d[i + 1] / 255, B0 = d[i + 2] / 255;
+      Yr[x] = 0.299 * R0 + 0.587 * G0 + 0.114 * B0; Ir[x] = 0.596 * R0 - 0.274 * G0 - 0.322 * B0; Qr[x] = 0.211 * R0 - 0.523 * G0 + 0.312 * B0;
+    }
+    let si = 0, sq = 0;   // 色の移動平均（左から右へ）
+    for (let x = -R; x < LW; x++) {
+      const a = Math.min(LW - 1, Math.max(0, x + R)), b = Math.min(LW - 1, Math.max(0, x - R - 1));
+      si += Ir[a] - (x >= 1 ? Ir[b] : 0); sq += Qr[a] - (x >= 1 ? Qr[b] : 0);
+      const X = x + CS;
+      if (X < 0 || X >= LW) continue;
+      const n = Math.min(2 * R + 1, x + R + 1);   // 足した数（端は端の色をくり返して数える）
+      let Y = 0.05 + Yr[X] * 0.88 + (Math.random() - 0.5) * noise;
+      const I = si / n * 0.8, Q = sq / n * 0.8, o = (r + X) * 4;
+      Rr[X] = Math.min(255, (Y + 0.956 * I + 0.621 * Q) * 255 * 1.04);
+      d[o + 1] = (Y - 0.272 * I - 0.647 * Q) * 255;
+      Br[X] = (Y - 1.106 * I + 1.703 * Q) * 255 * 0.93;
+    }
+    const split = Math.round(split0 * (inBand ? 2 : 1));   // 帯の中はずれを倍に
+    for (let x = 0; x < LW; x++) {   // RGB のずれ：R は左から、B は右から読む
+      const o = (r + x) * 4;
+      d[o] = Rr[Math.max(0, x - split)]; d[o + 2] = Br[Math.min(LW - 1, x + split)];
+    }
+  }
+}
+
+// --- 並べ方 ---
+// 0 そのまま、1 左半分を右へ鏡写し、2 2×2、3 3×3（ひとつおきに左右反転）。小節ごとに替える
+function layout(m) {
+  ctx.imageSmoothingEnabled = true;
+  if (m === 0) return ctx.drawImage(melt, 0, 0, W, H);
+  if (m === 1) {
+    ctx.drawImage(melt, 0, 0, LW / 2, LH, 0, 0, W / 2, H);
+    ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1); ctx.drawImage(melt, 0, 0, LW / 2, LH, 0, 0, W / 2, H); ctx.restore();
+    return;
+  }
+  const n = m === 2 ? 2 : 3, w = W / n, h = H / n;
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    ctx.save(); ctx.translate(x * w + ((x + y) % 2 && n === 3 ? w : 0), y * h);
+    if ((x + y) % 2 && n === 3) ctx.scale(-1, 1);
+    ctx.drawImage(melt, 0, 0, w, h); ctx.restore();
+  }
+}
+
+// --- 人の検出とカメラ ---
+// MediaPipe の PoseLandmarker で最大5人の骨格と、一人ずつの切り抜き（マスク）を毎フレーム取る。左から順に並べてメンバーに当てる。
+// 動画の中を切り抜いて動かす仮想のカメラで、引き（全員が真ん中に収まる）と、選んだ一人の顔と肩のアップを切り替える
+const det = document.createElement('canvas'), dctx = det.getContext('2d');      // 検出に渡す縮めたコマ（横 360px）
+const maskC = document.createElement('canvas'), mkctx = maskC.getContext('2d');
+const RING = 10, ring = Array.from({ length: RING }, () => document.createElement('canvas'));   // 切り抜きの直近10コマ（残像に使う）
+let pose = null, people = [], ringI = 0, detN = 0, hasCut = false, maskImg = null;
+const cam = { x: 0, y: 0, z: 1 }, camT = { x: 0, y: 0, z: 1 }, crop = { x: 0, y: 0, w: 1, h: 1 };
+let focus = 0, closeUp = false, snap = true, push = 0;
+const TV = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+import(TV).then(async ({ PoseLandmarker, FilesetResolver }) => {
+  const fs = await FilesetResolver.forVisionTasks(TV + '/wasm');
+  pose = await PoseLandmarker.createFromOptions(fs, {
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task', delegate: 'GPU' },
+    runningMode: 'VIDEO', numPoses: 5, outputSegmentationMasks: true,
+  });
+}).catch(e => { msg.textContent = '人の検出を読み込めませんでした: ' + e.message; });
+function track() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (pose && detN++ % 2 === 0) {   // 検出は重いので1コマおき
+    if (det.width !== 360) { det.width = 360; det.height = Math.round(360 * vh / vw); }
+    dctx.drawImage(video, 0, 0, det.width, det.height);
+    const r = pose.detectForVideo(det, performance.now());
+    // 腰の真ん中の x で左から並べる
+    const ps = r.landmarks.map((lm, i) => ({ lm, i, x: (lm[23].x + lm[24].x) / 2 })).sort((a, b) => a.x - b.x);
+    people = ps.map(p => {
+      const xs = p.lm.map(q => Math.min(1, Math.max(0, q.x))), ys = p.lm.map(q => Math.min(1, Math.max(0, q.y)));
+      return { ...p, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+    });
+    const f = people.length ? people[focus % people.length] : null;
+    if (f && r.segmentationMasks) cutout(r.segmentationMasks[f.i]); else hasCut = false;
+    r.segmentationMasks?.forEach(m => m.close());
+  }
+  aim(vw, vh);
+  if (snap) { Object.assign(cam, camT); snap = false; }   // 小節の頭はカット（一気に切り替える）
+  else for (const k of ['x', 'y', 'z']) cam[k] += (camT[k] - cam[k]) * 0.1;   // 小節の中はなめらかに追う
+}
+// カメラの狙い。引きは全員の外枠が収まるように、アップは顔と肩の中心に、肩幅が画面の 1/3 ほどになるまで寄る。
+// どちらも小節の中でゆっくり寄っていき（push）、ドロップの小節は引く
+function aim(vw, vh) {
+  const baseW = vw / Math.max(1, (vw / vh) / (W / H));   // 寄っていないときに切り抜く幅（動画の画素）
+  const zoomPush = 1 + push * 0.25;
+  const f = people.length ? people[focus % people.length] : null;
+  if (closeUp && f) {
+    const L = f.lm, sw = Math.max(0.03, Math.abs(L[11].x - L[12].x)) * vw;
+    camT.x = (L[0].x + (L[11].x + L[12].x) / 2) / 2 * vw; camT.y = (L[0].y * 0.6 + (L[11].y + L[12].y) / 2 * 0.4) * vh;
+    camT.z = Math.min(4, Math.max(1.3, baseW / (sw * 3))) * zoomPush;
+  } else if (people.length) {
+    const x0 = Math.min(...people.map(p => p.x0)), x1 = Math.max(...people.map(p => p.x1)), y0 = Math.min(...people.map(p => p.y0)), y1 = Math.max(...people.map(p => p.y1));
+    camT.x = (x0 + x1) / 2 * vw; camT.y = (y0 + y1) / 2 * vh;
+    camT.z = Math.min(1.6, Math.max(1, Math.min(baseW / ((x1 - x0) * vw * 1.3), vh / ((y1 - y0) * vh * 1.2)))) * zoomPush;
+  } else { camT.x = vw / 2; camT.y = vh / 2; camT.z = zoomPush; }
+}
+// 選んだ一人の切り抜き：検出に使ったコマにマスクを掛け、輪（ring）に入れる
+function cutout(m) {
+  const a = m.getAsFloat32Array();
+  if (!maskImg || maskImg.width !== m.width) { maskImg = new ImageData(m.width, m.height); maskC.width = m.width; maskC.height = m.height; }
+  for (let i = 0; i < a.length; i++) maskImg.data[i * 4 + 3] = a[i] * 255;
+  mkctx.putImageData(maskImg, 0, 0);
+  const h = ring[ringI++ % RING], hc = h.getContext('2d');
+  if (h.width !== det.width) { h.width = det.width; h.height = det.height; }
+  hc.globalCompositeOperation = 'copy'; hc.drawImage(det, 0, 0);
+  hc.globalCompositeOperation = 'destination-in'; hc.drawImage(maskC, 0, 0, det.width, det.height);
+  hc.globalCompositeOperation = 'source-over';
+  hasCut = true;
+}
+
+// --- 連続コピー（人だけ） ---
+// 選んだ一人だけを切り抜いて何重にも重ねる。4小節ごとに3つのやり方を替える。重ねたものほど色相を回し、彩度とコントラストを上げる
+//   0 残像：直近のコマの切り抜きを薄く重ねる / 1 分身：今の切り抜きを左右に並べる / 2 トンネル：その人を中心に縮めながら奥へ重ねる
+function personCopies(a, kind, t) {
+  if (!hasCut || a <= 0) return;
+  const k0 = det.width / video.videoWidth, sx = crop.x * k0, sy = crop.y * k0, sw = crop.w * k0, sh = crop.h * k0;
+  const f = people[focus % people.length];
+  const px = (((f.x0 + f.x1) / 2) * det.width - sx) / sw * W, py = (((f.y0 + f.y1) / 2) * det.height - sy) / sh * H;   // 画面の上のその人の中心
+  const cur = ring[(ringI - 1) % RING];
+  const draw = (cv, dx, sc, alpha, hue) => {
+    ctx.globalAlpha = Math.max(0, alpha); ctx.filter = `hue-rotate(${hue}deg) saturate(1.6) contrast(1.2)`;
+    ctx.drawImage(cv, sx, sy, sw, sh, px * (1 - sc) + dx, py * (1 - sc), W * sc, H * sc);
+  };
+  ctx.save();
+  if (kind === 0) for (let k = RING - 1; k >= 2; k -= 2) draw(ring[(ringI - 1 - k + RING * 100) % RING], 0, 1, a * (1 - k / RING), k * 30);
+  else if (kind === 1) for (let k = 3; k >= 1; k--) for (const g of [-1, 1]) draw(cur, g * k * W * 0.22, 1 - k * 0.1, a * (1 - k * 0.2), g * k * 45);
+  else for (let k = 6; k >= 1; k--) draw(cur, 0, 1 - k * 0.12, a * (1 - k * 0.1), k * 35 + t * 60);
+  ctx.restore();
+}
+
+// --- 文字 ---
+// 白い字に黒い影、R・G・B を少しずつずらして足し算で重ねる（重なったところだけ白くなる）
+function rgbText(s, x, y, size, dx, font = 'bold') {
+  ctx.font = `${font} ${size}px "Arial", "Apple SD Gothic Neo", sans-serif`;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillText(s, x + size * 0.06, y + size * 0.06);
+  ctx.globalCompositeOperation = 'lighter';
+  for (const [col, o] of [['#f00', -dx], ['#0f0', 0], ['#00f', dx]]) { ctx.fillStyle = col; ctx.fillText(s, x + o, y); }
+  ctx.globalCompositeOperation = 'source-over';
+}
+// 嘘の歌詞。曲は「무한재생（ENDLESS REPLAY）」。1行2小節、韓国語の下に小さく英語
+const VERSE = [
+  ['불 꺼진 교실에 너를 두고 왔어', 'I left you in the dark classroom'],
+  ['테이프가 늘어나 목소리가 녹아', 'the tape stretches, my voice melts'],
+  ['우리 이름 기억해? 아무도 몰라', 'remember our name? nobody knows'],
+  ['이 무대는 존재하지 않아', 'this stage does not exist'],
+];
+const CHORUS = [
+  ['Sweet sweet 꿈속에 갇혀', 'sweet sweet, trapped in a dream'],
+  ['Rewind rewind 다시 처음부터', 'rewind rewind, from the start again'],
+  ['깨어나지 마 깨어나지 마', "don't wake up, don't wake up"],
+  ['ILLUSIA 영원히 재생 중', 'ILLUSIA, playing forever'],
+];
+// 曲の構成（48小節＝64秒でひと回り）：前奏8・A メロ8・サビ8・A メロ8・サビ16
+const isChorus = b => { b %= 48; return (b >= 16 && b < 24) || b >= 32; };
+const lyricAt = b => { const k = b % 48; return k < 8 ? null : (isChorus(b) ? CHORUS : VERSE)[(k >> 1) % 4]; };
+// 80年代のカラオケ：太い縁取りの白い字が、歌に合わせて左から色が変わっていく。今の行は左寄せで上、次の行は右寄せで下
+function karaokeLine(s, x, y, size, align, p) {
+  ctx.font = `900 ${size}px "Apple SD Gothic Neo", "Arial Black", sans-serif`; ctx.textAlign = align; ctx.lineJoin = 'round';
+  const w = ctx.measureText(s).width, x0 = align === 'left' ? x : x - w;
+  ctx.lineWidth = size * 0.22; ctx.strokeStyle = '#1a0a6e'; ctx.strokeText(s, x, y);
+  ctx.fillStyle = '#fff'; ctx.fillText(s, x, y);
+  if (p <= 0) return;
+  ctx.save(); ctx.beginPath(); ctx.rect(x0 - size, y - size * 1.2, size + w * Math.min(1, p), size * 2); ctx.clip();
+  ctx.strokeStyle = '#fff'; ctx.strokeText(s, x, y); ctx.fillStyle = '#ff2fa8'; ctx.fillText(s, x, y);
+  ctx.restore();
+}
+function karaoke(t, bar) {
+  const u = W / 1080, m = 60 * u, k = bar % 48;
+  if (k < 4) {   // 前奏の頭：タイトルカード
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    karaokeLine('무한재생', W / 2, H * 0.42, 150 * u, 'center', 0);
+    rgbText('ENDLESS REPLAY', W / 2, H * 0.42 + 90 * u, 56 * u, 4 * u);
+    rgbText('♪ ILLUSIA (일루시아)', W / 2, H * 0.42 + 170 * u, 44 * u, 4 * u, 'normal');
+    rgbText('작사 엄마 · 작곡 아빠 · 편곡 삼촌', W / 2, H * 0.42 + 240 * u, 34 * u, 3 * u, 'normal');
+    return;
+  }
+  // 上の行と下の行が交互に歌われる。歌い終わった行は、次の次の行に入れ替わる
+  const b0 = bar - (k % 2), top = (b0 >> 1) % 2 === 0;
+  const p = ((k % 2) + Math.min(1, (t - barT) / (ST * 16))) / 2 * 1.1 - 0.05;   // 2小節かけて色を変える
+  const y = H * 0.8, size = 62 * u, gap = 170 * u;
+  const L1 = lyricAt(top ? b0 : b0 + 2), L2 = lyricAt(top ? b0 + 2 : b0);
+  ctx.textBaseline = 'alphabetic';
+  if (L1) { karaokeLine(L1[0], m, y, size, 'left', top ? p : 0); if (top) { ctx.textAlign = 'left'; rgbText(L1[1], m, y + 58 * u, 32 * u, 3 * u, 'italic'); } }
+  if (L2) { karaokeLine(L2[0], W - m, y + gap, size, 'right', top ? 0 : p); if (!top) { ctx.textAlign = 'right'; rgbText(L2[1], W - m, y + gap + 58 * u, 32 * u, 3 * u, 'italic'); } }
+}
+const MEMBERS = ['HARIN 하린', 'SOI 소이', 'YUNA 유나', 'DAON 다온', 'RIA 리아'];
+function overlay(t, bar, s, split) {
+  const u = W / 1080, m = 56 * u;
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  rgbText(t % 1 < 0.6 ? 'PLAY ▶' : '', m, m, 48 * u, split, 'normal');
+  rgbText('SP', m, m + 60 * u, 40 * u, split, 'normal');
+  ctx.textAlign = 'right';
+  const tc = Math.floor(t), f = Math.floor(t % 1 * 30);
+  rgbText(`0:${String(tc / 60 | 0).padStart(2, '0')}:${String(tc % 60).padStart(2, '0')}`, W - m, m, 48 * u, split, 'normal');
+  rgbText(`JUN 14 2003  ${String(f).padStart(2, '0')}F`, W - m, H - m - 40 * u, 36 * u, split, 'normal');
+  // メンバーの名前は左上、歌詞はカラオケ
+  ctx.textAlign = 'left';
+  rgbText(MEMBERS[focus % MEMBERS.length], m, m + 130 * u, 40 * u, split);
+  karaoke(t, bar);
+}
+// ドロップの小節で一瞬だけ出す、黒地に白い字の問いかけ
+const ASK = ['ARE YOU STILL WATCHING?', 'THIS IS NOT YOUR MEMORY', '기억나?', 'WHERE DID THEY GO?'];
+
+// --- 光 ---
+function bloom(strength) {
+  gctx.filter = 'blur(8px)'; gctx.globalCompositeOperation = 'copy';
+  gctx.drawImage(c, 0, 0, glow.width, glow.height);
+  ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = strength;
+  ctx.drawImage(glow, 0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+
+// --- 音 ---
+// 180BPM のガバ。歪みきった四つ打ちのキック、裏のオープンハット、デチューンしたノコギリ波のフーバー（音程が下から上がってくる）、
+// サビは K-POP らしい明るいリードのメロディ。48小節（64秒）でひと回り。8小節目はキックを抜いてフーバーだけ残す
+const BPM = 180, ST = 60 / BPM / 4, events = [];
+let step = 0;   // 録画のときは 0 に戻して、曲の頭から録る
+let ac, out, audioDest, kbus, drums, echo, noiseBuf;
+const now = () => ac ? ac.currentTime : performance.now() / 1000;
+const mtof = m => 440 * 2 ** ((m - 69) / 12);
+const shaper = drive => { const s = ac.createWaveShaper(); s.curve = Float32Array.from({ length: 2048 }, (_, i) => Math.tanh((i / 1023.5 - 1) * drive) / Math.tanh(drive)); return s; };
+function startAudio() {
+  if (ac) return ac.resume();
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -10; comp.ratio.value = 8; comp.attack.value = 0.002;
+  out = ac.createGain(); out.gain.value = 0.42;
+  out.connect(shaper(1.6)).connect(comp);
+  comp.connect(ac.destination); comp.connect(audioDest = ac.createMediaStreamDestination());
+
+  // キック：11-05 squelch より強く歪ませて四角い波に潰す（ロッテルダムのガバ）
+  kbus = ac.createGain();
+  const kl = ac.createBiquadFilter(); kl.type = 'lowpass'; kl.frequency.value = 6000;
+  const kg = ac.createGain(); kg.gain.value = 0.55;
+  kbus.connect(shaper(22)).connect(kl).connect(kg).connect(out);
+  drums = ac.createGain(); drums.connect(out);
+
+  // フーバーとリードのディレイ（付点8分）
+  echo = ac.createDelay(1); echo.delayTime.value = ST * 3;
+  const fb = ac.createGain(); fb.gain.value = 0.3;
+  const ef = ac.createBiquadFilter(); ef.type = 'lowpass'; ef.frequency.value = 3000;
+  echo.connect(ef).connect(fb).connect(echo); ef.connect(out);
+
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+
+  let next = ac.currentTime + 0.1;
+  setInterval(() => { while (next < ac.currentTime + 0.2) { play(step++, next); next += ST; } }, 25);
+}
+const noise = () => { const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true; s.loopStart = Math.random(); return s; };
+function kickAt(t) {
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(360, t); o.frequency.exponentialRampToValueAtTime(62, t + 0.04); o.frequency.exponentialRampToValueAtTime(48, t + 0.25);
+  g.gain.setValueAtTime(1, t); g.gain.setValueAtTime(1, t + 0.15); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.3);
+  o.connect(g).connect(kbus); o.start(t); o.stop(t + 0.32);
+}
+function hit(t, type, freq, q, v, len) {
+  const n = noise(), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = type; f.frequency.value = freq; f.Q.value = q;
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(1e-4, t + len);
+  n.connect(f).connect(g).connect(drums); n.start(t); n.stop(t + len + 0.02);
+}
+// フーバー：ノコギリ波3本（±28セント）と1オクターブ下。音程は7半音下から 70ms で上がり、ローパスは閉じていく
+function hooverAt(t, midi, len) {
+  const f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'lowpass'; f.Q.value = 3; f.frequency.setValueAtTime(4200, t); f.frequency.exponentialRampToValueAtTime(700, t + len);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.16, t + 0.005); g.gain.setValueAtTime(0.16, t + len); g.gain.linearRampToValueAtTime(0, t + len + 0.08);
+  f.connect(g).connect(out); g.connect(echo);
+  for (const [m, d] of [[midi, -28], [midi, 0], [midi, 28], [midi - 12, 0]]) {
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(m);
+    o.detune.setValueAtTime(d - 700, t); o.detune.linearRampToValueAtTime(d, t + 0.07);
+    o.connect(f); o.start(t); o.stop(t + len + 0.1);
+  }
+}
+// リード：矩形波と1オクターブ上のサイン波の短い音
+function leadAt(t, midi) {
+  const g = ac.createGain();
+  g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(1e-4, t + ST * 1.8);
+  g.connect(out); g.connect(echo);
+  for (const [m, type] of [[midi, 'square'], [midi + 12, 'sine']]) {
+    const o = ac.createOscillator(); o.type = type; o.frequency.value = mtof(m); o.connect(g); o.start(t); o.stop(t + ST * 2);
+  }
+}
+// 4小節のコード：Am F C G（フーバーは根音だけ）。リードは A マイナーのペンタトニックで2小節の型
+const ROOTS = [57, 53, 48, 55];
+const HOOK = [76, -1, 79, -1, 81, 79, 76, -1, 74, -1, 76, -1, 72, -1, 74, 76, 76, -1, 79, -1, 81, 84, 83, 81, 79, -1, 76, -1, 74, -1, 72, -1];
+function play(step, t) {
+  const bar = Math.floor(step / 16), s = step % 16, root = ROOTS[bar % 4];
+  if (s === 0) events.push({ t, type: 'bar', bar });
+  const drop = bar % 8 === 7, intro = bar % 48 < 8;
+  if (s % 4 === 0 && (!drop || s === 0)) { kickAt(t); events.push({ t, type: 'kick', bar, s }); }
+  if (s % 4 === 2 && !drop) hit(t, 'highpass', 7000, 0.7, 0.18, 0.12);   // 裏のオープンハット
+  if (s % 2 === 1 && !intro) hit(t, 'highpass', 9000, 0.7, 0.05, 0.03);
+  if (s === 0 && bar % 8 === 0) hit(t, 'highpass', 4000, 0.5, 0.25, 1.2);   // 8小節ごとのクラッシュ
+  if (s === 0 || (!intro && [3, 6, 10, 12].includes(s)) || (drop && s % 2 === 0)) {
+    hooverAt(t, root + (s === 10 ? 3 : 0), ST * (s === 0 ? 3 : 1.6)); events.push({ t, type: 'stab', bar, s });
+  }
+  if (isChorus(bar)) { const n = HOOK[(bar % 2) * 16 + s]; if (n > 0) { leadAt(t, n); events.push({ t, type: 'lead' }); } }
+}
+
+// --- 映像 ---
+let kick = 0, stab = 0, lead = 0, melting = 0, str = null, moshEnd = 0, freeze = 0, inv = 0, ask = 0, askText = '', mode = 0, copyKind = 0, bar = 0, barT = 0, sNow = 0;
+const blocks = [];   // ブロックずれ：画面の矩形を何コマかずらして残す
+function onEvent(e) {
+  const G = +$('glitch').value;
+  if (e.type === 'bar') {
+    bar = e.bar; barT = e.t; mode = [0, 1, 0, 2, 0, 3, 1, 2][bar % 8];
+    if (bar % 4 === 0) copyKind = (bar >> 2) % 3;   // 4小節ごとにコピーのやり方を替える
+    // カメラ：2小節ごとに次のメンバーへ。奇数の小節はその人のアップ、偶数の小節は引き。小節の頭はカットで切り替える
+    focus = bar >> 1; closeUp = bar % 2 === 1; snap = true; video = vids[(bar >> 1) % vids.length];
+    // データモッシュ：ドロップの小節は必ず、サビの小節の頭はグリッチの強さに応じて。1小節続く
+    if (bar % 8 === 7 || (isChorus(bar) && Math.random() < G * 0.5)) moshEnd = e.t + ST * 16;
+  }
+  if (e.type === 'kick') {
+    kick = 1; sNow = e.s; moshSeed += 1 + Math.random() * 2;
+    win = Math.random() < 0.6 ? [W * (0.05 + Math.random() * 0.3), H * (0.1 + Math.random() * 0.4), W * (0.4 + Math.random() * 0.3), H * (0.15 + Math.random() * 0.2)] : null;
+    if (Math.random() < G * 0.3) freeze = 2 + (Math.random() * 3 | 0);   // コマ止め
+    if (e.s === 12 && Math.random() < G * 0.5) roll = LH * (0.05 + Math.random() * 0.15);   // 小節の最後の拍で縦に流れる
+  }
+  if (e.type === 'stab') {
+    stab = 1;
+    for (let i = 0; i < 2 + G * 6; i++) blocks.push({ x: Math.random() * W, y: Math.random() * H, w: 80 + Math.random() * 400, h: 20 + Math.random() * 160, dx: (Math.random() - 0.5) * 200, dy: (Math.random() - 0.5) * 60, life: 2 + (Math.random() * 6 | 0) });
+    if (Math.random() < 0.3 + G * 0.4) str = { vert: Math.random() < 0.3, p: Math.random() * (W * 0.7) + W * 0.15, life: 2 + (Math.random() * 4 | 0) };   // 引き伸ばし
+    if (e.s === 0) melting = 1;
+    if (e.s === 0 && e.bar % 2) inv = 2;   // 奇数小節の頭で反転
+    if (e.bar % 8 === 7 && e.s === 8) { ask = 10; askText = ASK[(e.bar >> 3) % ASK.length]; }
+  }
+  if (e.type === 'lead') lead = 1;
+}
+function frame() {
+  requestAnimationFrame(frame);
+  while (ac && events.length && events[0].t <= ac.currentTime) onEvent(events.shift());
+  if (freeze > 0) freeze--; else sample();
+  if (!ok) return;
+  kick *= 0.85; stab *= 0.85; lead *= 0.8; melting *= 0.96;
+  const t = now(), split = (+$('rgb').value * 6 + kick * 8) * W / 1080, A = +$('copy').value;
+  // 溶け方：小節の頭のフーバーで大きく溶けてゆっくり戻る。サビはリードでも揺れる
+  // 4小節ごとに色と白黒を入れ替える。白黒の区間は暗視カメラの映像に光る落書きの輪郭を重ねる
+  const mono = (bar >> 2) % 2 === 1, moshing = t < moshEnd, G = +$('glitch').value;
+  meltFrame(G * (melting + lead * 0.3), t, mono);
+  if (moshing) mosh(t); else layout(mono && mode > 1 ? 0 : mode);   // 白黒の区間はタイルにしない（落書きが合わなくなる）
+  if (mono && !moshing) scribble(G);
+  // 拡縮：小節の中でゆっくり寄っていき、ドロップの小節は引いていく
+  push = bar % 8 === 7 ? -0.6 * Math.min(1, (t - barT) / (ST * 16)) : Math.min(1, (t - barT) / (ST * 16));
+  // 連続コピー（人だけ）。フーバーで濃く。タイルのときは位置が合わないので出さない
+  if (!moshing && mode < 2) personCopies(A * 0.8 + stab * A * 0.3, copyKind, t);
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]; ctx.drawImage(c, b.x, b.y, b.w, b.h, b.x + b.dx, b.y + b.dy, b.w, b.h);
+    if (--b.life <= 0) blocks.splice(i, 1);
+  }
+  if (str) { stretch(str); if (--str.life <= 0) str = null; }
+  // 走査線と、周りを暗くするにじみ。サビは淡いピンクのもやをかけて夢っぽく
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 2);
+  if (moshing) tint(0.75); else if (!mono && isChorus(bar)) tint(0.35 + lead * 0.2);   // サビとモッシュは青〜マゼンタに
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.7);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.6)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  if ($('text').checked) overlay(t, bar, sNow, split);
+  if (ask > 0) {   // 黒地に白い字
+    ask--; ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; rgbText(askText, W / 2, H / 2, 72 * W / 1080, split * 2, 'normal');
+  }
+  if (inv > 0) { inv--; ctx.globalCompositeOperation = 'difference'; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H); ctx.globalCompositeOperation = 'source-over'; }
+  pctx.drawImage(c, 0, 0, prev.width, prev.height);   // 次のコマで重ねる写し（文字ごと写すので、文字もトンネルの奥へ落ちていく）
+  bloom(0.2 + kick * 0.25 + (mono ? 0.15 : 0) + (isChorus(bar) ? 0.2 : 0));   // 白黒の区間は落書きを光らせる
+}
+
+$('aspect').onchange = setSize; setSize();
+requestAnimationFrame(frame);
+const setRate = () => vids.forEach(v => { v.playbackRate = +$('rate').value; });
+$('rate').onchange = setRate;
+$('file').onchange = e => { const f = e.target.files[0]; if (f) { vids.splice(1); video = vids[0]; video.src = URL.createObjectURL(f); video.play(); } };   // 選んだ1本だけにする
+vids.forEach(v => { v.onloadeddata = () => { setRate(); v.play(); }; });
+$('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+
+$('rec').onclick = e => {
+  startAudio(); step = 0; vids.forEach(v => { v.currentTime = 0; });
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(window.lastBlob = new Blob(chunks, { type }));
+    a.download = `ghostidol_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), $('dur').value * 1000);
+};
+</script>
+
+</body>
+</html>

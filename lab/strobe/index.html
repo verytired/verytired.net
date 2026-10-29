@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>#001 strobe — verytired.net</title>
+<meta name="description" content="Turns a bundle of photos into a strobe-style video.">
+<style>
+  :root { --bg: #121214; --fg: #ececec; --dim: #8a8a8a; --accent: #5cc8ff; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: #000; color: var(--fg); font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; overflow: hidden; }
+  a, button { color: inherit; font: inherit; }
+  #stage { position: fixed; inset: 0 0 56px; width: 100%; height: calc(100% - 56px); border: 0; display: block; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 56px; display: flex; align-items: center; gap: 4px; padding: 0 12px;
+         background: rgba(18,18,20,.92); border-top: 1px solid #222; backdrop-filter: blur(8px); }
+  #bar .t { margin-right: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  #bar .t b { color: var(--accent); font-weight: normal; }
+  #bar .t span { color: var(--dim); }
+  #bar button, #bar a.k { background: none; border: 1px solid #333; padding: 6px 10px; cursor: pointer; text-decoration: none; text-transform: uppercase; letter-spacing: .05em; }
+  #bar button:hover, #bar a.k:hover { border-color: var(--accent); color: var(--accent); }
+  #bar button.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  #bar button:disabled { opacity: .35; cursor: default; }
+  #bar .grp { display: flex; }
+  #bar .grp button + button { border-left: 0; }
+  #rec.live { border-color: #ff3d6e; color: #ff3d6e; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .4; } }
+  /* 音の強さを横いっぱいの細い線で出す（作品に analyser があるときだけ） */
+  #meter { position: fixed; left: 0; right: 0; bottom: 55px; height: 24px; pointer-events: none; }
+  #prog { position: absolute; left: 0; top: -1px; height: 1px; width: 0; background: #ff3d6e; }
+  #hint { position: fixed; inset: 0 0 56px; display: grid; place-items: center; pointer-events: none; color: var(--accent); letter-spacing: .3em; transition: opacity .4s; }
+  #hint.off { opacity: 0; }
+  @media (max-width: 640px) { #bar .t span, #bar .hide-s { display: none; } }
+</style>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-B7JVRP12X1"></script>
+<script>window.dataLayer = window.dataLayer || []; function gtag(){dataLayer.push(arguments);} gtag('js', new Date()); gtag('config', 'G-B7JVRP12X1');</script>
+</head>
+<body>
+<iframe id="stage" src="piece.html" title="strobe"></iframe>
+<div id="hint">[ SPACE / CLICK TO PLAY ]</div>
+<canvas id="meter"></canvas>
+<div id="bar">
+  <div id="prog"></div>
+  <a class="k" href="../../" title="Back (Esc)">←</a>
+  <div class="t"><b>#001</b> strobe <span>Turns a bundle of photos into a strobe-style video.</span></div>
+  <button id="photos" hidden>Load photos</button>
+  <button id="play" title="Play / pause (Space)">▶ Play</button>
+  <div class="grp hide-s" id="aspects"></div>
+  <button id="rec" title="Record and save mp4 (R)">● Rec</button>
+</div>
+<script>
+// 作品（piece.html）は hitori_av の HTML そのまま。#panel を隠し、中のボタンをこのバーから押す
+const stage = document.getElementById('stage'), $ = id => document.getElementById(id);
+let W, D, playing = false;
+const get = name => { try { return W.eval(`typeof ${name} === 'undefined' ? null : ${name}`); } catch { return null; } };  // 作品側の let 変数を読む
+
+stage.onload = () => {
+  W = stage.contentWindow; D = W.document;
+  const s = D.createElement('style');
+  s.textContent = `#panel{position:absolute!important;left:-9999px!important}
+    body{margin:0!important;padding:0!important;height:100vh;display:grid!important;place-items:center;overflow:hidden;background:#000!important}
+    canvas{max-width:100vw!important;max-height:100vh!important;cursor:pointer}`;
+  D.head.append(s);
+
+  // 比率: 作品の select の選択肢をそのままボタンにする
+  const sel = D.getElementById('aspect');
+  if (sel) [...sel.options].forEach(o => {
+    const b = document.createElement('button');
+    b.textContent = o.text; b.onclick = () => { sel.value = o.value; sel.dispatchEvent(new W.Event('change')); mark(); };
+    $('aspects').append(b);
+  });
+  const mark = () => [...$('aspects').children].forEach((b, i) => b.classList.toggle('on', sel.selectedIndex === i));
+  if (sel) mark();
+
+  // 写真を読み込む作品（strobe）は Play の代わりに Load photos
+  const files = D.getElementById('files');
+  if (files) { $('photos').hidden = false; $('photos').onclick = () => files.click(); files.addEventListener('change', () => { playing = true; sync(); }); }
+  if (!D.getElementById('play')) $('play').hidden = true;
+
+  // 録画ボタンの disabled を見て、録画中の表示と進捗バーを出す
+  const rec = D.getElementById('rec'), dur = D.getElementById('dur');
+  if (!rec) $('rec').hidden = true;
+  else new W.MutationObserver(() => {
+    const live = rec.disabled;
+    $('rec').classList.toggle('live', live); $('rec').textContent = live ? '● Recording' : '● Rec';
+    $('prog').style.transition = 'none'; $('prog').style.width = '0';
+    if (live) requestAnimationFrame(() => { $('prog').style.transition = `width ${dur ? dur.value : 15}s linear`; $('prog').style.width = '100%'; });
+  }).observe(rec, { attributes: true });
+
+  // 素材の動画を読む作品（slowdive）は、Play を押すまで動画も止めておく
+  D.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { if (!playing) v.pause(); }));
+  D.querySelectorAll('video').forEach(v => v.pause());
+  D.addEventListener('click', () => { if (D.getElementById('play')) toggle(); });
+  D.addEventListener('keydown', key);
+};
+
+const sync = () => {
+  $('play').textContent = playing ? '❚❚ Pause' : '▶ Play';
+  $('play').classList.toggle('on', playing);
+  $('hint').classList.toggle('off', playing);
+};
+const toggle = async () => {
+  const ac = get('ac');
+  if (!playing) { if (ac && ac.state === 'suspended') await ac.resume(); else D.getElementById('play')?.click(); playing = true; }
+  else { if (ac) await ac.suspend(); playing = false; }
+  D.querySelectorAll('video').forEach(v => playing ? v.play() : v.pause());
+  sync();
+};
+$('play').onclick = toggle;
+$('rec').onclick = () => { if (!playing) toggle(); D.getElementById('rec')?.click(); };
+
+const key = e => {
+  if (e.key === ' ') { e.preventDefault(); toggle(); }
+  else if (e.key === 'r' || e.key === 'R') $('rec').click();
+  else if (e.key === 'Escape') location.href = '../../';
+};
+addEventListener('keydown', key);
+
+// メーター: 作品の AnalyserNode（an）から周波数を読み、中央から左右に広がる線で描く
+const m = $('meter'), mc = m.getContext('2d');
+let buf, own;
+const meter = () => {
+  requestAnimationFrame(meter);
+  m.width = innerWidth; m.height = 24;
+  // an を持たない作品（modlines・slowdive）は、出力の out から分岐させて自前で作る
+  if (W && playing && !own && !get('an') && get('out')) { own = get('ac').createAnalyser(); get('out').connect(own); }
+  const an = W && playing ? get('an') || own : null;
+  if (!an || !an.getByteFrequencyData) return;
+  if (!buf || buf.length !== an.frequencyBinCount) buf = new Uint8Array(an.frequencyBinCount);
+  an.getByteFrequencyData(buf);
+  const n = 96, w = m.width / 2 / n;
+  for (let i = 0; i < n; i++) {
+    const v = buf[Math.floor(i / n * buf.length * .6)] / 255, h = v * v * 24;
+    mc.fillStyle = `hsl(${200 + i * 1.2 + v * 60}, 100%, ${50 + v * 20}%)`;
+    mc.fillRect(m.width / 2 + i * w, 24 - h, w - 1, h);
+    mc.fillRect(m.width / 2 - (i + 1) * w, 24 - h, w - 1, h);
+  }
+};
+meter();
+</script>
+</body>
+</html>
