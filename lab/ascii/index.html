@@ -111,6 +111,8 @@ const toggle = async () => {
   playing = !playing;
   // iOS はタップの中で play() しないと素材の動画を読み込まない（読めるまで作品は何も描かない）ので、await より前に呼ぶ
   media().forEach(v => playing ? v.play().catch(() => {}) : v.pause());
+  // iOS は消音スイッチで Web Audio も黙るので、音楽の再生として鳴らす（iOS 17 から）
+  [W, window].forEach(w => { if (w.navigator.audioSession) w.navigator.audioSession.type = 'playback'; });
   if (playing) { if (ac && ac.state === 'suspended') await ac.resume(); else D.getElementById('play')?.click(); }
   else if (ac) await ac.suspend();
   sync();
