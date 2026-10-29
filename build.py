@@ -37,7 +37,7 @@ def build_item(d):
                 shutil.copy(d / src, dst / src)  # 作品が素材として読む動画（slowdive の dive.mp4 など）はそのまま置く
     loop = dst / "loop.mp4"
     if mp4.exists() and (not loop.exists() or loop.stat().st_mtime < mp4.stat().st_mtime):
-        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", mp4, "-t", "8", "-an", "-vf", "scale=480:-2",
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", mp4, "-t", "8", "-an", "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=480:-2",
                         "-c:v", "libx264", "-crf", "32", "-preset", "slow", "-pix_fmt", "yuv420p",
                         "-movflags", "+faststart", loop], check=True)
     return {
