@@ -136,8 +136,8 @@ const m = $('meter'), mc = m.getContext('2d');
 let buf, own;
 const meter = () => {
   requestAnimationFrame(meter);
-  // 素材の動画が届くまでは LOADING を出す
-  const loading = D && playing && media().some(v => v.readyState < 2);
+  // 素材の動画と人の検出（ghostidol・sugarrush の pose）が揃うまでは LOADING を出す。検出は読めなかったときのため 20 秒で待つのをやめる
+  const loading = D && playing && (media().some(v => v.readyState < 2) || (W.eval("typeof pose !== 'undefined' && !pose") && performance.now() < 20000));
   $('hint').textContent = loading ? '[ LOADING ]' : '[ SPACE / CLICK TO PLAY ]';
   $('hint').classList.toggle('off', playing && !loading);
   m.width = innerWidth; m.height = 24;
