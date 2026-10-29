@@ -5,6 +5,7 @@
 - lab/<名前>/piece.html  … 作品の HTML をそのままコピー（自己完結しているので書き換えない）
 - lab/<名前>/index.html  … player.html で piece.html を包む（英語の操作バー）
 - lab/<名前>/src/       … 作品が読む素材のフォルダ（あればそのままコピー）
+- lab/<名前>/**.sp.mp4  … 素材の動画のスマホ向けの軽い版（540px 幅・無音）
 - lab/<名前>/loop.mp4     … 1:1 版の mp4 から作る無音・480px・8秒のループ（元の mp4 はサイトに入れない）
 - index.html                  … template.html の {{ITEMS}} を埋める
 """
@@ -26,6 +27,15 @@ def first_sentence(readme):
     return ""
 
 
+def sp(m):
+    """スマホ向けの軽い素材 <名前>.sp.mp4（player.html がタッチの端末でこちらに差し替える）"""
+    out = m.with_suffix(".sp.mp4")
+    if not out.exists() or out.stat().st_mtime < m.stat().st_mtime:
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", m, "-an", "-vf", "scale='min(540,iw)':-2",
+                        "-c:v", "libx264", "-crf", "28", "-preset", "slow", "-g", "30", "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart", out], check=True)
+
+
 def build_item(d):
     name = d.name.split("_", 1)[1]
     piece, mp4 = d / f"{name}.html", d / f"{name}.mp4"
@@ -35,9 +45,12 @@ def build_item(d):
         shutil.copy(piece, dst / "piece.html")
         for src in re.findall(r'src="([^"/]+\.mp4)"', piece.read_text(errors="ignore")):
             if (d / src).exists():
-                shutil.copy(d / src, dst / src)  # 作品が素材として読む動画（slowdive の dive.mp4 など）はそのまま置く
+                shutil.copy2(d / src, dst / src)  # 作品が素材として読む動画（slowdive の dive.mp4 など）はそのまま置く
         if (d / "src").is_dir() and "src/" in piece.read_text(errors="ignore"):
             shutil.copytree(d / "src", dst / "src", dirs_exist_ok=True)  # 素材をフォルダで読む作品（ghostidol の src/*.mp4）
+        for m in [*dst.glob("*.mp4"), *dst.glob("src/*.mp4")]:
+            if m.name != "loop.mp4" and not m.name.endswith(".sp.mp4"):
+                sp(m)
     loop = dst / "loop.mp4"
     if mp4.exists() and (not loop.exists() or loop.stat().st_mtime < mp4.stat().st_mtime):
         subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", mp4, "-t", "8", "-an", "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=480:-2",
