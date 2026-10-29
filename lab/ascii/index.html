@@ -47,12 +47,12 @@
   <button id="photos" hidden>Load photos</button>
   <button id="play" title="Play / pause (Space)">▶ Play</button>
   <div class="grp hide-s" id="aspects"></div>
-  <button id="rec" title="Record and save mp4 (R)">● Rec</button>
+  <button id="rec" title="Record and save mp4, press again to stop (R)">● Rec</button>
 </div>
 <script>
 // 作品（piece.html）は hitori_av の HTML そのまま。#panel を隠し、中のボタンをこのバーから押す
 const stage = document.getElementById('stage'), $ = id => document.getElementById(id);
-let W, D, playing = false;
+let W, D, playing = false, recorder;
 const get = name => { try { return W.eval(`typeof ${name} === 'undefined' ? null : ${name}`); } catch { return null; } };  // 作品側の let 変数を読む
 
 stage.onload = () => {
@@ -84,10 +84,13 @@ stage.onload = () => {
   if (!rec) $('rec').hidden = true;
   else new W.MutationObserver(() => {
     const live = rec.disabled;
-    $('rec').classList.toggle('live', live); $('rec').textContent = live ? '● Recording' : '● Rec';
+    $('rec').classList.toggle('live', live); $('rec').textContent = live ? '■ Stop' : '● Rec';
     $('prog').style.transition = 'none'; $('prog').style.width = '0';
     if (live) requestAnimationFrame(() => { $('prog').style.transition = `width ${dur ? dur.value : 15}s linear`; $('prog').style.width = '100%'; });
   }).observe(rec, { attributes: true });
+  // 作品は決まった秒数で止まるので、途中で止められるよう録画中の MediaRecorder を覚えておく
+  const start = W.MediaRecorder?.prototype.start;
+  if (start) W.MediaRecorder.prototype.start = function (...a) { recorder = this; return start.apply(this, a); };
 
   // 素材の動画を読む作品（slowdive）は、Play を押すまで動画も止めておく
   D.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { if (!playing) v.pause(); }));
@@ -109,7 +112,10 @@ const toggle = async () => {
   sync();
 };
 $('play').onclick = toggle;
-$('rec').onclick = () => { if (!playing) toggle(); D.getElementById('rec')?.click(); };
+$('rec').onclick = () => {
+  if (recorder?.state === 'recording') return recorder.stop();  // 途中で止めても、そこまでの分は保存される
+  if (!playing) toggle(); D.getElementById('rec')?.click();
+};
 
 const key = e => {
   if (e.key === ' ') { e.preventDefault(); toggle(); }
