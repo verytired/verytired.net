@@ -21,7 +21,7 @@
   <label>にじみ <input type="range" id="blur" min="0" max="1" step="0.05" value="0.6"></label>
   <label>光 <input type="range" id="glow" min="0" max="1" step="0.05" value="0.5"></label>
   <button id="play">▶ 音を鳴らす</button>
-  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="32"></label>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="48"></label>
   <button id="rec">● 録画して保存</button>
 </div>
 <canvas id="c"></canvas>
@@ -131,29 +131,39 @@ function play(step, t) {
   if (bar >= 4 && bar % 8 !== 7 && (s === 0 || s === 8)) { kickAt(t); events.push({ t, type: 'kick' }); }   // 5小節目からキック。8小節目は抜く
 }
 
-// --- VHS（2026-11-04 slowdive から） ---
+// --- VHS（2026-11-04 slowdive から、強めた） ---
 // 小さな写し（d、RGBA、w×h）を行ごとに崩す。G（0..1.5）で全部まとめて強くなる
 //   1. 行を左右にずらす（テープの揺れ、トラッキングの帯の中は大きく）。roll で画面が縦に流れる
-//   2. 明るさ（Y）と色（I, Q）に分け、色だけ横にぼかして右へずらす（色のにじみ）
-//   3. 黒を浮かせ、暖色に寄せ、ノイズを足す。R を右、B を左へずらす
-//   4. 下の端の数行はヘッドの切り替わりで大きく右へ流し、ノイズで埋める
-let Yr = new Float32Array(0), Ir = Yr, Qr = Yr, Rr = Yr, Br = Yr, roll = 0;
+//   2. 明るさ（Y）と色（I, Q）に分ける。明るさは横に少しぼかしてから輪郭を立て、白い縁（リンギング）を出す
+//   3. 色は横に大きくぼかして右へずらし、上の行とも混ぜる（色は縦の解像度も低い）
+//   4. 黒を浮かせ、暖色に寄せ、ノイズを足す。R を右、B を左へずらす
+//   5. 下の端はヘッドの切り替わりで右へ流してノイズで埋める。ときどき白い短い線（ドロップアウト）と、横に走るスノー
+let Yr = new Float32Array(0), Ys = Yr, Ir = Yr, Qr = Yr, Ip = Yr, Qp = Yr, Rr = Yr, Br = Yr, roll = 0;
 function vhs(d, w, h, G, t) {
-  if (Yr.length !== w) [Yr, Ir, Qr, Rr, Br] = [0, 0, 0, 0, 0].map(() => new Float32Array(w));
+  if (Yr.length !== w) [Yr, Ys, Ir, Qr, Ip, Qp, Rr, Br] = [0, 0, 0, 0, 0, 0, 0, 0].map(() => new Float32Array(w));
   const s = w / 270;   // 揺れやずれの量を、にじみのつまみ（写しの大きさ）によらずそろえる
   const bh = h * (0.025 + 0.05 * G), bands = [((t * 0.15) % 1.4 - 0.2) * h];
   if (G > 0.6) bands.push(((t * 0.53 + 0.4) % 1.4 - 0.2) * h);
-  const R = Math.round((3 + G * 3) * s), CS = Math.round((2 + G * 3) * s), split = Math.round((1 + G * 3) * s), noise = 0.05 + G * 0.1;
-  const head = h * 0.96, ro = Math.round(roll), src = new Uint8ClampedArray(d);
+  const snow = Math.random() < 0.04 + G * 0.1 ? Math.random() * h : -99, snowH = h * (0.005 + Math.random() * 0.02);   // 横に走るスノー
+  const drops = Array.from({ length: Math.random() * (2 + G * 6) | 0 }, () => [Math.random() * h | 0, Math.random() * w | 0, (8 + Math.random() * 50) * s | 0]);   // ドロップアウト：行、始まり、長さ
+  const R = Math.round((4 + G * 4) * s), CS = Math.round((3 + G * 4) * s), split = Math.round((1 + G * 3) * s), noise = 0.06 + G * 0.1;
+  const RW = Math.max(2, Math.round(4 * s)), head = h * 0.94, ro = Math.round(roll), src = new Uint8ClampedArray(d);
   for (let y = 0; y < h; y++) {
-    const inBand = bands.some(b => Math.abs(y - b) < bh);
+    const inBand = bands.some(b => Math.abs(y - b) < bh), inSnow = Math.abs(y - snow) < snowH;
     let off = Math.sin(y * 0.05 + t * 2.3) * (0.8 + G) * s + (inBand ? (Math.random() - 0.5) * (10 + 30 * G) * s : 0);
-    if (y > head) off += ((y - head) / (h - head)) ** 2 * 25 * s;
+    if (y > head) off += ((y - head) / (h - head)) ** 2 * 35 * s;
     off = Math.round(off);
     const r = y * w, sr = (((y + ro) % h) + h) % h * w;
     for (let x = 0; x < w; x++) {
       const i = (sr + Math.min(w - 1, Math.max(0, x - off))) * 4, R0 = src[i] / 255, G0 = src[i + 1] / 255, B0 = src[i + 2] / 255;
       Yr[x] = 0.299 * R0 + 0.587 * G0 + 0.114 * B0; Ir[x] = 0.596 * R0 - 0.274 * G0 - 0.322 * B0; Qr[x] = 0.211 * R0 - 0.523 * G0 + 0.312 * B0;
+    }
+    // 明るさ：3画素でぼかし（Ys）、RW 画素の平均との差を足して輪郭に縁を出す
+    let sw = 0;
+    for (let x = 0; x < w; x++) Ys[x] = (Yr[Math.max(0, x - 1)] + Yr[x] + Yr[Math.min(w - 1, x + 1)]) / 3;
+    for (let x = -RW; x < w; x++) {
+      sw += Ys[Math.min(w - 1, x + RW)] - (x - RW - 1 >= 0 ? Ys[x - RW - 1] : x >= 1 ? Ys[0] : 0);
+      if (x >= 0) Yr[x] = Ys[x] + 0.8 * (Ys[x] - sw / Math.min(2 * RW + 1, x + RW + 1));
     }
     const n2 = (inBand || y > head) ? noise * 4 : noise;
     let si = 0, sq = 0;   // 色の移動平均（左から右へ）
@@ -162,34 +172,101 @@ function vhs(d, w, h, G, t) {
       si += Ir[a] - (x >= 1 ? Ir[b] : 0); sq += Qr[a] - (x >= 1 ? Qr[b] : 0);
       const X = x + CS;
       if (X < 0 || X >= w) continue;
-      const n = Math.min(2 * R + 1, x + R + 1), Y = 0.06 + Yr[X] * 0.88 + (Math.random() - 0.5) * n2;
-      const I = si / n * 0.85, Q = sq / n * 0.85;
+      const n = Math.min(2 * R + 1, x + R + 1);
+      let Y = 0.07 + Yr[X] * 0.86 + (Math.random() - 0.5) * n2;
+      if (inSnow) Y = Math.random() * (0.4 + Math.random() * 0.6);
+      const I = (si / n + Ip[X]) * 0.42, Q = (sq / n + Qp[X]) * 0.42 + (Math.random() - 0.5) * noise * 0.3;   // 上の行の色と混ぜ、色にもノイズ
+      Ip[X] = si / n; Qp[X] = sq / n;
       Rr[X] = (Y + 0.956 * I + 0.621 * Q) * 255 * 1.05;
       d[(r + X) * 4 + 1] = (Y - 0.272 * I - 0.647 * Q) * 255;
       Br[X] = (Y - 1.106 * I + 1.703 * Q) * 255 * 0.92;
     }
     for (let x = 0; x < w; x++) { const o = (r + x) * 4; d[o] = Rr[Math.max(0, x - split)]; d[o + 2] = Br[Math.min(w - 1, x + split)]; }
   }
+  for (const [y, x0, len] of drops) for (let x = x0; x < Math.min(w, x0 + len); x++) {
+    const o = (y * w + x) * 4, v = 200 + Math.random() * 55; d[o] = d[o + 1] = d[o + 2] = v;
+  }
+}
+
+// --- データモッシュ ---
+// 毎コマ、新しいコマ（N）を 8px のブロックに分け、前のコマ（P）のどこから来たか（動きベクトル）を探す。
+// モッシュ中は、画面に出しているコマ（mosh）をそのベクトルで動かし、N と「動かした P」の差（残差）を足す。
+// キーフレームを抜いた動画と同じで、前の場面の絵が新しい場面の動きに引きずられ、輪郭が少しずつ浮かんでくる。
+// hold のときは前のベクトルをくり返し、残差は足さず、下へ流れる向きを足す（bloom：画面全体が垂れて溶ける）
+const MB = 8, MR = 3;
+let P = null, mosh = null, VX = null, VY = null, moshUntil = 0, holdUntil = 0, flowSeed = 0;
+function datamosh(d, w, h, on, hold, t) {
+  const N = new Uint8ClampedArray(d);
+  if (!P || P.length !== d.length) { P = N; mosh = Float32Array.from(d); return; }
+  const bw = Math.ceil(w / MB), bh = Math.ceil(h / MB);
+  if (!VX || VX.length !== bw * bh) { VX = new Float32Array(bw * bh); VY = new Float32Array(bw * bh); }
+  if (on) {
+    for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) {
+      const k = by * bw + bx;
+      if (hold) {   // bloom：前のベクトルに、列ごとに速さの違う下向きの流れを足す
+        VY[k] = VY[k] * 0.8 - 0.2 * (0.5 + 1.2 * (0.5 + 0.5 * Math.sin(bx * 0.9 + t * 0.7)));
+        VX[k] = VX[k] * 0.8 + 0.2 * Math.sin(by * 0.5 + t) * 0.8;
+        continue;
+      }
+      let best = 1e9, bvx = 0, bvy = 0;
+      for (let vy = -MR; vy <= MR; vy++) for (let vx = -MR; vx <= MR; vx++) {
+        let sad = 0;
+        for (let y = by * MB; y < Math.min(h, by * MB + MB); y += 2) for (let x = bx * MB; x < Math.min(w, bx * MB + MB); x += 2) {
+          const sx = Math.min(w - 1, Math.max(0, x + vx)), sy = Math.min(h - 1, Math.max(0, y + vy));
+          sad += Math.abs(N[(y * w + x) * 4 + 1] - P[(sy * w + sx) * 4 + 1]);
+        }
+        if (sad < best) { best = sad; bvx = vx; bvy = vy; }
+      }
+      // 前のベクトルを半分残して勢いをつけ、替わり目ごとに決めた流れ（場所でなめらかに向きが変わる）を足す。素材の動きはゆっくりで、測った動きだけでは前の絵がほとんど動かない
+      const fa = Math.sin(bx * 0.35 + flowSeed) * 2 + Math.cos(by * 0.22 + flowSeed * 1.7) * 2;
+      VX[k] = VX[k] * 0.5 + bvx + Math.cos(fa) * (0.2 + 0.6 * lv); VY[k] = VY[k] * 0.5 + bvy + Math.sin(fa) * (0.2 + 0.6 * lv);
+    }
+    const out = new Float32Array(d.length);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const k = (y / MB | 0) * bw + (x / MB | 0), o = (y * w + x) * 4;
+      const sx = Math.min(w - 1, Math.max(0, Math.round(x + VX[k] * 2.2))), sy = Math.min(h - 1, Math.max(0, Math.round(y + VY[k] * 2.2))), m = (sy * w + sx) * 4;   // 動きは大げさに
+      const px = Math.min(w - 1, Math.max(0, x + Math.round(VX[k]))), py = Math.min(h - 1, Math.max(0, y + Math.round(VY[k]))), q = (py * w + px) * 4;
+      for (let ch = 0; ch < 3; ch++) {
+        // 残差は一部だけ足して前の絵を長く残す（lv が高いほど残る）。垂れているあいだは新しいコマを少しずつ混ぜ、一色に流れきらないようにする
+        out[o + ch] = hold ? mosh[m + ch] * 0.93 + N[o + ch] * 0.07 : mosh[m + ch] + (N[o + ch] - P[q + ch]) * (0.9 - 0.3 * lv);
+        d[o + ch] = out[o + ch];
+      }
+      out[o + 3] = 255;
+    }
+    mosh = out;
+  } else mosh.set(N);
+  P = N;
 }
 
 // --- 映像 ---
-// 場面の替わり目は、テープを早送りして次へ飛ぶように崩す。やり方は3つから選ぶ
+// 場面の替わり目は、テープを早送りして次へ飛ぶように崩す。やり方は4つから選ぶ
 //   track：トラッキングが外れて帯が暴れる / roll：画面が縦に流れる / freeze：前の場面で一瞬止まってから切り替わる
-// 8小節目（キックが抜ける小節）は小節じゅう強く崩し、オルゴールの音で画面が跳ねる
-let cur = 0, prev = 0, tCut = -9, box = 0, kick = 0, gl = 0, freezeUntil = 0, drop = false;
+//   mosh：ディゾルブせずに切り替え、前の場面の絵を新しい場面の動きで引きずる（データモッシュ）。1〜2.4秒
+// オルゴールの音でときどき短く垂れる。8小節目（キックが抜ける小節）は小節じゅう強く崩し、頭からモッシュして後半は垂れて溶ける
+// モッシュのかかり具合 lv（0..1）は、5場面のひと回り（1ループ）ごとに強くなり、LOOPS ループで最初に戻る。
+// lv で、替わり目がモッシュになる確率・モッシュの長さ・流れの強さ・前の絵の残りやすさ・オルゴールでかかる確率が上がる
+const LOOPS = 3;
+let cur = 0, prev = 0, tCut = -9, box = 0, kick = 0, gl = 0, freezeUntil = 0, drop = false, lv = 0;
 function onEvent(e) {
   if (e.type === 'bar') {
     prev = cur; cur = e.bar % SCENES.length; tCut = e.t; drop = e.bar % 8 === 7;
+    lv = (Math.floor(e.bar / SCENES.length) % LOOPS) / (LOOPS - 1);
     if (e.bar) {
       gl = 1;
-      const k = ['track', 'roll', 'freeze'][Math.random() * 3 | 0];
+      const k = drop || Math.random() < lv ? 'mosh' : ['track', 'roll', 'freeze'][Math.random() * 3 | 0];
+      if (k === 'mosh') { tCut = e.t - 1; flowSeed = Math.random() * 100; moshUntil = e.t + (drop ? ST * 15 : 1 + 1.4 * lv); gl = 0.3; if (drop) holdUntil = moshUntil, holdFrom = e.t + ST * 6; }
       if (k === 'roll') roll = lo.height * (0.3 + Math.random() * 0.5);
       if (k === 'freeze') { freezeUntil = e.t + 0.3; tCut = freezeUntil; }
     }
   }
-  if (e.type === 'box') { box = 1; if (drop && Math.random() < 0.5) roll = lo.height * (0.05 + Math.random() * 0.15); }
+  if (e.type === 'box') {
+    box = 1;
+    if (e.t > moshUntil && Math.random() < 0.3 * lv) { moshUntil = e.t + 0.35; holdFrom = e.t; holdUntil = moshUntil; }
+    if (drop && Math.random() < 0.5) roll = lo.height * (0.05 + Math.random() * 0.15);
+  }
   if (e.type === 'kick') kick = 1;
 }
+let holdFrom = 0;
 // 動画の真ん中を画面の比率で切り抜いて lctx に描く
 function drawScene(i, a) {
   const v = vids[i]; if (v.readyState < 2) return;
@@ -197,10 +274,13 @@ function drawScene(i, a) {
   lctx.globalAlpha = a;
   lctx.drawImage(v, (v.videoWidth - sw) / 2, (v.videoHeight - sh) / 2, sw, sh, 0, 0, lo.width, lo.height);
 }
-let still = false;   // 音が鳴っていないあいだ（始める前・一時停止中）は、1コマ描いたら止めておく
+// 音の時刻が進んでいないあいだ（始める前・一時停止中）は、1コマ描いたら止めておく。
+// ac.state では見ない（tools/render.py は音をコマごとに suspend しながら進める）
+let still = false, lastT = -1;
 function frame() {
   requestAnimationFrame(frame);
-  if (still && (!ac || ac.state !== 'running')) return;
+  if (still && (!ac || ac.currentTime === lastT)) return;
+  lastT = ac ? ac.currentTime : -1;
   const t = ac ? ac.currentTime : performance.now() / 1000;
   while (ac && events.length && events[0].t <= t) onEvent(events.shift());
   box *= 0.9; kick *= 0.88; gl *= 0.9; roll *= 0.88;
@@ -214,11 +294,12 @@ function frame() {
     drawScene(prev, 1); drawScene(cur, mix); lctx.globalAlpha = 1;
   }
   const im = lctx.getImageData(0, 0, r, rh);
-  vhs(im.data, r, rh, 0.35 + gl * 1.1 + (drop ? 0.6 : 0), t);
+  datamosh(im.data, r, rh, t < moshUntil, t >= holdFrom && t < holdUntil, t);
+  vhs(im.data, r, rh, 0.5 + gl * 1.1 + (drop ? 0.5 : 0), t);
   vctx.putImageData(im, 0, 0);
 
   ctx.imageSmoothingEnabled = true;
-  ctx.filter = 'saturate(1.3) contrast(1.05)';
+  ctx.filter = 'saturate(1.2) contrast(1.05)';
   ctx.drawImage(vh, 0, 0, W, H);
   ctx.filter = 'none';
   ctx.fillStyle = 'rgba(0,0,0,0.16)';   // 走査線
@@ -241,7 +322,7 @@ function frame() {
   still = vids[0].readyState >= 2;
 }
 
-document.getElementById('aspect').onchange = setSize; setSize();
+document.getElementById('aspect').onchange = () => { setSize(); still = false; }; setSize();
 requestAnimationFrame(frame);
 document.getElementById('play').onclick = startAudio;
 c.onpointerdown = startAudio;
