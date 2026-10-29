@@ -4,6 +4,7 @@
 使い方: python3 build.py [../hitori_av]
 - lab/<名前>/piece.html  … 作品の HTML をそのままコピー（自己完結しているので書き換えない）
 - lab/<名前>/index.html  … player.html で piece.html を包む（英語の操作バー）
+- lab/<名前>/src/       … 作品が読む素材のフォルダ（あればそのままコピー）
 - lab/<名前>/loop.mp4     … 1:1 版の mp4 から作る無音・480px・8秒のループ（元の mp4 はサイトに入れない）
 - index.html                  … template.html の {{ITEMS}} を埋める
 """
@@ -35,6 +36,8 @@ def build_item(d):
         for src in re.findall(r'src="([^"/]+\.mp4)"', piece.read_text(errors="ignore")):
             if (d / src).exists():
                 shutil.copy(d / src, dst / src)  # 作品が素材として読む動画（slowdive の dive.mp4 など）はそのまま置く
+        if (d / "src").is_dir() and "src/" in piece.read_text(errors="ignore"):
+            shutil.copytree(d / "src", dst / "src", dirs_exist_ok=True)  # 素材をフォルダで読む作品（ghostidol の src/*.mp4）
     loop = dst / "loop.mp4"
     if mp4.exists() and (not loop.exists() or loop.stat().st_mtime < mp4.stat().st_mtime):
         subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", mp4, "-t", "8", "-an", "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=480:-2",
