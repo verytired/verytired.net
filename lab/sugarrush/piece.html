@@ -36,7 +36,7 @@ const c = document.getElementById('c'), ctx = c.getContext('2d');
 const grab = document.createElement('canvas'), gr = grab.getContext('2d', { willReadFrequently: true });   // 偽色にするコマ（1/3 の大きさ）
 const trail = document.createElement('canvas'), tctx = trail.getContext('2d');   // 残像：前のコマの写し
 const $ = id => document.getElementById(id), msg = $('msg');
-const vids = ['park', 'street', 'rooftop', 'selfie'].map(n => Object.assign(document.createElement('video'), { src: `src/${n}_v1.mp4`, muted: true, loop: true, playsInline: true }));
+const vids = ['park', 'street', 'rooftop', 'selfie'].map(n => Object.assign(document.createElement('video'), { src: `src/${n}_v2.mp4`, muted: true, loop: true, playsInline: true }));
 vids.forEach(v => { v.onloadeddata = () => v.play(); });
 let video = vids[0], W, H, LW, LH;
 const setSize = () => {
