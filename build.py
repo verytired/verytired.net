@@ -8,6 +8,8 @@
 - lab/<名前>/**.sp.mp4  … 素材の動画のスマホ向けの軽い版（540px 幅・無音）
 - lab/<名前>/loop.mp4     … 1:1 版の mp4 から作る無音・480px・8秒のループ（元の mp4 はサイトに入れない）
 - index.html                  … template.html の {{ITEMS}} を埋める
+- music/index.html            … music.tsv（曲名\tURL、上から並ぶ）から同じ template.html で作る
+  YouTube の URL はサムネイル→押すと再生、それ以外（Bandcamp の EmbeddedPlayer の URL など）はそのまま iframe で埋める
 """
 import html, re, shutil, subprocess, sys
 from pathlib import Path
@@ -79,6 +81,25 @@ def tile(i, n):
             f'<em>{html.escape(i["en"] or i["desc"])}</em></span></a>')
 
 
+def track(title, url):
+    yt = re.search(r"(?:youtu\.be/|[?&]v=)([\w-]{11})", url)
+    if yt:
+        return (f'<a class="tile" href="{html.escape(url)}" data-yt="{yt[1]}">'
+                f'<img src="https://i.ytimg.com/vi/{yt[1]}/hqdefault.jpg" alt="" loading="lazy">'
+                f'<span class="cap"><i>{html.escape(title)}</i></span></a>')
+    return (f'<div class="tile"><iframe src="{html.escape(url)}" loading="lazy" seamless></iframe>'
+            f'<span class="cap"><i>{html.escape(title)}</i></span></div>')
+
+
+def music():
+    rows = [l.split("\t", 1) for l in (OUT / "music.tsv").read_text().splitlines() if "\t" in l]
+    page = (OUT / "template.html").read_text()
+    for k, v in {"ITEMS": "\n".join(track(t, u.strip()) for t, u in rows), "SUB": f"{len(rows)} tracks", "ROOT": "../"}.items():
+        page = page.replace("{{%s}}" % k, v)
+    (OUT / "music").mkdir(exist_ok=True)
+    (OUT / "music" / "index.html").write_text(page)
+
+
 def main():
     dirs = sorted(d for d in SRC.iterdir() if d.is_dir() and re.match(r"\d{4}-\d{2}-\d{2}_", d.name))  # 並び順にだけ日付を使う
     for old in LAB.glob("*") if LAB.exists() else []:
@@ -91,8 +112,9 @@ def main():
             player(i, n)
     page = (OUT / "template.html").read_text()
     page = page.replace("{{ITEMS}}", "\n".join(tile(i, n) for n, i in numbered))
-    page = page.replace("{{COUNT}}", str(len(items)))
+    page = page.replace("{{SUB}}", f"{len(items)} pieces · click to play live").replace("{{ROOT}}", "./")
     (OUT / "index.html").write_text(page)
+    music()
     print(f"{len(items)} items -> index.html")
 
 

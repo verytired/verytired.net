@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>verytired.net</title>
+<meta name="description" content="Experiments in sound and image, made with code.">
+<style>
+  :root { --bg: #121214; --fg: #ececec; --dim: #8a8a8a; --accent: #5cc8ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+  a { color: inherit; text-decoration: none; }
+  /* 背景の文字にゆっくり流れる虹色を塗る（文字ごとに色を付けず、グラデーションを文字で切り抜く） */
+  #field { background: linear-gradient(115deg, #3d7bff, #3df2ff, #7a5cff, #d23dff, #3d7bff) 0 0 / 300% 300%;
+           -webkit-background-clip: text; background-clip: text; color: transparent; animation: psy 24s linear infinite; }
+  @keyframes psy { to { background-position: 300% 300%; } }
+  @media (prefers-reduced-motion: reduce) { #field { animation: none; } }
+  #field { position: fixed; inset: 0; margin: 0; opacity: .28; overflow: hidden; pointer-events: none; z-index: -1; line-height: 1; }
+  header { padding: 24px 16px 8px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 13px; margin: 0; font-weight: normal; color: var(--accent); }
+  header span { color: var(--dim); }
+  header span a:hover, header h1 a:hover { color: var(--fg); }
+  main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .tile { display: block; background: var(--bg); }
+  .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
+  .tile:hover video, .tile:hover img { transform: scale(1.015); }
+  .cap { display: block; padding: 6px 0; }
+  .cap b { color: var(--accent); font-weight: normal; }
+  .cap i { font-style: normal; }
+  .cap em { display: block; font-style: normal; color: var(--dim); }
+  .tile:hover .cap b { background: var(--accent); color: var(--bg); }
+  footer { padding: 48px 16px 32px; color: var(--dim); }
+  footer p { margin: 0 0 4px; }
+  footer b { color: var(--fg); font-weight: normal; }
+  footer a { color: var(--accent); }
+  footer a:hover { text-decoration: underline; }
+</style>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-B7JVRP12X1"></script>
+<script>window.dataLayer = window.dataLayer || []; function gtag(){dataLayer.push(arguments);} gtag('js', new Date()); gtag('config', 'G-B7JVRP12X1');</script>
+</head>
+<body>
+<pre id="field" aria-hidden="true"></pre>
+<header>
+  <h1><a href="../">verytired.net</a></h1>
+  <span><a href="../">works</a> / <a href="../music/">music</a> · 11 tracks</span>
+</header>
+<main>
+<a class="tile" href="https://youtu.be/w67YjPqLhh4" data-yt="w67YjPqLhh4"><img src="https://i.ytimg.com/vi/w67YjPqLhh4/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Practice - Minimal House/Rominimal Style 2025.12.31</i></span></a>
+<a class="tile" href="https://youtu.be/MKXzJWvEBos" data-yt="MKXzJWvEBos"><img src="https://i.ytimg.com/vi/MKXzJWvEBos/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Live Jam Practice - Techno Style #2</i></span></a>
+<a class="tile" href="https://youtu.be/9PYGkURCfgk" data-yt="9PYGkURCfgk"><img src="https://i.ytimg.com/vi/9PYGkURCfgk/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Live Jam Practice - Techno Style</i></span></a>
+<a class="tile" href="https://youtu.be/knasJfUze9k" data-yt="knasJfUze9k"><img src="https://i.ytimg.com/vi/knasJfUze9k/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Practice - Minimal House/Rominimal Style #4</i></span></a>
+<a class="tile" href="https://youtu.be/zN5Q--N39S0" data-yt="zN5Q--N39S0"><img src="https://i.ytimg.com/vi/zN5Q--N39S0/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Practice - Minimal House/Rominimal Style #3 2025.01.29</i></span></a>
+<a class="tile" href="https://youtu.be/CG982_a-NJE" data-yt="CG982_a-NJE"><img src="https://i.ytimg.com/vi/CG982_a-NJE/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Practice - Minimal House/Rominimal Style #2 2025.01.25</i></span></a>
+<a class="tile" href="https://youtu.be/TsgyUrR4QSs" data-yt="TsgyUrR4QSs"><img src="https://i.ytimg.com/vi/TsgyUrR4QSs/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Practice - Minimal House/Rominimal Style #1 2025.01.21</i></span></a>
+<a class="tile" href="https://youtu.be/4V9FSrwaKPU" data-yt="4V9FSrwaKPU"><img src="https://i.ytimg.com/vi/4V9FSrwaKPU/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Practice - Techno 2025.01.18</i></span></a>
+<a class="tile" href="https://youtu.be/GuMS4Hi0CBQ" data-yt="GuMS4Hi0CBQ"><img src="https://i.ytimg.com/vi/GuMS4Hi0CBQ/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Practice - Techno 2025.01.16</i></span></a>
+<a class="tile" href="https://youtu.be/Wrmsrn2JbCc" data-yt="Wrmsrn2JbCc"><img src="https://i.ytimg.com/vi/Wrmsrn2JbCc/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Practice - Dub Techno 2025.01.13</i></span></a>
+<a class="tile" href="https://youtu.be/_wJiRbWPQQI" data-yt="_wJiRbWPQQI"><img src="https://i.ytimg.com/vi/_wJiRbWPQQI/hqdefault.jpg" alt="" loading="lazy"><span class="cap"><i>VCV Rack Practice - Techno 2025.01.12</i></span></a>
+</main>
+<footer>
+  <p><b>veryTired</b></p>
+  <p>Developer, not Engineer. —— code / sound / image / notes. father.</p>
+  <p><a href="https://x.com/very_tired">X</a> / <a href="https://www.instagram.com/verytired.developer/">Instagram</a> / <a href="https://www.youtube.com/@verytired.developer">YouTube</a> / <a href="https://github.com/verytired">GitHub</a></p>
+</footer>
+<script>
+// 背景: 文字で描く干渉縞（ertdfgcvb 風）。動きを減らす設定なら止める
+const pre = document.getElementById('field'), chars = ' .·:-=+*#%@';
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let cols, rows;
+const resize = () => { cols = Math.ceil(innerWidth / 7.8); rows = Math.ceil(innerHeight / 13); };
+addEventListener('resize', resize); resize();
+const draw = t => {
+  let s = '';
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const v = Math.sin(x * .09 + t * .0007) + Math.sin(y * .17 - t * .0005) + Math.sin(Math.hypot(x - cols / 2, (y - rows / 2) * 2) * .12 - t * .001);
+      s += chars[Math.max(0, Math.min(chars.length - 1, Math.floor((v + 3) / 6 * chars.length)))];
+    }
+    s += '\n';
+  }
+  pre.textContent = s;
+  if (!still) requestAnimationFrame(draw);
+};
+requestAnimationFrame(draw);
+
+// 見えている動画だけ再生する
+const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? e.target.play().catch(() => {}) : e.target.pause()));
+document.querySelectorAll('video').forEach(v => io.observe(v));
+
+// YouTube はサムネイルだけ出し、押したらその場で再生する
+document.querySelectorAll('[data-yt]').forEach(a => a.addEventListener('click', e => {
+  e.preventDefault();
+  a.querySelector('img').outerHTML = `<iframe src="https://www.youtube-nocookie.com/embed/${a.dataset.yt}?autoplay=1" allow="autoplay; encrypted-media; fullscreen" allowfullscreen></iframe>`;
+}, { once: true }));
+</script>
+</body>
+</html>

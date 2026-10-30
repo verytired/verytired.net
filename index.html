@@ -19,10 +19,11 @@
   header { padding: 24px 16px 8px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   header h1 { font-size: 13px; margin: 0; font-weight: normal; color: var(--accent); }
   header span { color: var(--dim); }
+  header span a:hover, header h1 a:hover { color: var(--fg); }
   main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .tile { display: block; background: var(--bg); }
-  .tile video { width: 100%; aspect-ratio: 1; display: block; background: #000; transition: transform .2s; }
-  .tile:hover video { transform: scale(1.015); }
+  .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
+  .tile:hover video, .tile:hover img { transform: scale(1.015); }
   .cap { display: block; padding: 6px 0; }
   .cap b { color: var(--accent); font-weight: normal; }
   .cap i { font-style: normal; }
@@ -40,8 +41,8 @@
 <body>
 <pre id="field" aria-hidden="true"></pre>
 <header>
-  <h1>verytired.net</h1>
-  <span>15 pieces · click to play live</span>
+  <h1><a href="./">verytired.net</a></h1>
+  <span><a href="./">works</a> / <a href="./music/">music</a> · 15 pieces · click to play live</span>
 </header>
 <main>
 <a class="tile" href="lab/idolwerk/"><video src="lab/idolwerk/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#015</b> <i>idolwerk</i><em>A fake MV for an idol group that doesn&#x27;t exist, the four late-1970s Kraftwerk members recast as four Japanese women, built on the look of &quot;The Robots&quot;: red shirts, black ties and stiff synchronized moves, with hyperpop glitches on top and a robot-voiced 808 electro track that turns hyperpop in the chorus.</em></span></a>
@@ -89,6 +90,12 @@ requestAnimationFrame(draw);
 // 見えている動画だけ再生する
 const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? e.target.play().catch(() => {}) : e.target.pause()));
 document.querySelectorAll('video').forEach(v => io.observe(v));
+
+// YouTube はサムネイルだけ出し、押したらその場で再生する
+document.querySelectorAll('[data-yt]').forEach(a => a.addEventListener('click', e => {
+  e.preventDefault();
+  a.querySelector('img').outerHTML = `<iframe src="https://www.youtube-nocookie.com/embed/${a.dataset.yt}?autoplay=1" allow="autoplay; encrypted-media; fullscreen" allowfullscreen></iframe>`;
+}, { once: true }));
 </script>
 </body>
 </html>
