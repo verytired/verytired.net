@@ -20,7 +20,9 @@
   header { padding: 24px 16px 8px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   header h1 { font-size: 13px; margin: 0; font-weight: normal; color: var(--accent); }
   header span { color: var(--dim); }
-  header span a:hover, header h1 a:hover { color: var(--fg); }
+  header span { margin-left: auto; }
+  header nav { color: var(--dim); }
+  header nav a:hover, header h1 a:hover { color: var(--fg); }
   main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .tile { display: block; background: var(--bg); }
   .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
@@ -43,7 +45,8 @@
 <pre id="field" aria-hidden="true"></pre>
 <header>
   <h1><a href="{{ROOT}}">verytired.net</a></h1>
-  <span><a href="{{ROOT}}">works</a> / <a href="{{ROOT}}music/">music</a> · {{SUB}}</span>
+  <nav><a href="{{ROOT}}">works</a> / <a href="{{ROOT}}music/">music</a></nav>
+  <span>{{SUB}}</span>
 </header>
 <main>
 {{ITEMS}}

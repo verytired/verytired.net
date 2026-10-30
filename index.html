@@ -20,7 +20,9 @@
   header { padding: 24px 16px 8px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   header h1 { font-size: 13px; margin: 0; font-weight: normal; color: var(--accent); }
   header span { color: var(--dim); }
-  header span a:hover, header h1 a:hover { color: var(--fg); }
+  header span { margin-left: auto; }
+  header nav { color: var(--dim); }
+  header nav a:hover, header h1 a:hover { color: var(--fg); }
   main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .tile { display: block; background: var(--bg); }
   .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
@@ -43,7 +45,8 @@
 <pre id="field" aria-hidden="true"></pre>
 <header>
   <h1><a href="./">verytired.net</a></h1>
-  <span><a href="./">works</a> / <a href="./music/">music</a> · 15 pieces · click to play live</span>
+  <nav><a href="./">works</a> / <a href="./music/">music</a></nav>
+  <span>15 pieces · click to play live</span>
 </header>
 <main>
 <a class="tile" href="lab/idolwerk/"><video src="lab/idolwerk/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#015</b> <i>idolwerk</i><em>A fake MV for an idol group that doesn&#x27;t exist, the four late-1970s Kraftwerk members recast as four Japanese women, built on the look of &quot;The Robots&quot;: red shirts, black ties and stiff synchronized moves, with hyperpop glitches on top and a robot-voiced 808 electro track that turns hyperpop in the chorus.</em></span></a>
