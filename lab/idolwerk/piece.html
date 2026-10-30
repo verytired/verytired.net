@@ -334,48 +334,42 @@ function drawStickers(t) {
 // ブレイクはロボットの声とシーケンサーだけにして、最後の小節をスネアの連打で上げる。全体を最後に強くクリップさせる。
 // 構成は40小節（76秒）：前奏4・A メロ8・サビ8・ブレイク4・サビ8・ラスサビ8
 const BPM = 126, ST = 60 / BPM / 4, events = [];
-let step = 0, ac, out, audioDest, duck, kbus, kclean, crushBus, echo, noiseBuf;
+let step = 0, ac, out, audioDest, duck, kbus, kclean, noiseBuf;
 const now = () => ac ? ac.currentTime : performance.now() / 1000;
 const mtof = m => 440 * 2 ** ((m - 69) / 12);
 const shaper = (drive) => { const s = ac.createWaveShaper(); s.curve = Float32Array.from({ length: 2048 }, (_, i) => Math.tanh((i / 1023.5 - 1) * drive) / Math.tanh(drive)); return s; };
-const crusher = (bits) => { const s = ac.createWaveShaper(), n = 2 ** bits; s.curve = Float32Array.from({ length: 4096 }, (_, i) => Math.round((i / 2047.5 - 1) * n) / n); return s; };
 const section = b => { b %= 40; return b < 4 ? 'intro' : b < 12 ? 'verse' : b < 20 ? 'chorus' : b < 24 ? 'break' : b < 32 ? 'chorus' : 'last'; };
 function startAudio() {
   if (ac) return ac.resume();
   ac = new AudioContext();
   const comp = ac.createDynamicsCompressor(); comp.threshold.value = -10; comp.ratio.value = 6; comp.attack.value = 0.002;
   out = ac.createGain(); out.gain.value = 0.42;
-  out.connect(shaper(2.2)).connect(comp);
+  out.connect(shaper(1.2)).connect(comp);
   comp.connect(ac.destination); comp.connect(audioDest = ac.createMediaStreamDestination());
   duck = ac.createGain(); duck.connect(shaper(2)).connect(out);   // キックで沈める上モノ
-  kbus = ac.createGain(); const kl = ac.createBiquadFilter(); kl.type = 'lowpass'; kl.frequency.value = 7000; kbus.connect(shaper(1.5)).connect(kl).connect(out);   // サビのキック：少しだけ歪ませる
+  kbus = ac.createGain(); const kl = ac.createBiquadFilter(); kl.type = 'lowpass'; kl.frequency.value = 7000; kbus.connect(kl).connect(out);   // サビのキック：歪ませない（Kraftwerk のドラムマシンは素直な音）
   kclean = ac.createGain(); kclean.connect(out);   // A メロのキック：歪ませない
-  crushBus = ac.createGain(); crushBus.connect(crusher(4)).connect(shaper(4)).connect(out);   // ビットクラッシュに送る
-  echo = ac.createDelay(1); echo.delayTime.value = ST * 3;
-  const fb = ac.createGain(), ef = ac.createBiquadFilter(); fb.gain.value = 0.35; ef.type = 'highpass'; ef.frequency.value = 500;
-  echo.connect(ef).connect(fb).connect(echo); ef.connect(duck);
   noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
   const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
   let next = ac.currentTime + 0.1;
   setInterval(() => { while (next < ac.currentTime + 0.2) { play(step++, next); next += ST; } }, 25);
 }
 const noise = () => { const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true; s.loopStart = Math.random(); return s; };
-// 808 のキック：サイン波を 120Hz あたりからゆっくり 48Hz まで下げ、長く伸ばす（「ドゥーン」）
+// 乾いたキック：サイン波を 125Hz から 48Hz へ下げ、短く切る（Numbers のドラムマシンのように響かせない）
 function kickAt(t, hard) {
-  const o = ac.createOscillator(), g = ac.createGain(), len = hard ? 0.6 : 0.5, v = hard ? 0.6 : 0.5;
+  const o = ac.createOscillator(), g = ac.createGain(), len = hard ? 0.28 : 0.22, v = hard ? 0.7 : 0.6;
   o.frequency.setValueAtTime(125, t); o.frequency.exponentialRampToValueAtTime(52, t + 0.08); o.frequency.exponentialRampToValueAtTime(48, t + len);
   g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(v, t + 0.003); g.gain.exponentialRampToValueAtTime(1e-4, t + len);
   o.connect(g).connect(hard ? kbus : kclean); o.start(t); o.stop(t + len + 0.02);
   duck.gain.cancelScheduledValues(t); duck.gain.setValueAtTime(hard ? 0.6 : 0.8, t); duck.gain.linearRampToValueAtTime(1, t + ST * 2);
 }
-let last808 = 40;
-function bassAt(t, midi, len, glide) {
-  const o = ac.createOscillator(), g = ac.createGain(), sh = shaper(10), lp = ac.createBiquadFilter();
-  lp.type = 'lowpass'; lp.frequency.value = 1800;
-  o.frequency.setValueAtTime(mtof(glide ? last808 : midi), t); if (glide) o.frequency.exponentialRampToValueAtTime(mtof(midi), t + 0.12);
-  g.gain.setValueAtTime(0.4, t); g.gain.setValueAtTime(0.4, t + len * 0.8); g.gain.linearRampToValueAtTime(0, t + len);
-  o.connect(sh).connect(lp).connect(g).connect(out); o.start(t); o.stop(t + len + 0.02);
-  last808 = midi;
+// ミニモーグ風のベース：ノコギリ波をローパスで「ブッ」と短く開いて閉じる。すべらせない
+function bassAt(t, midi, len) {
+  const o = ac.createOscillator(), g = ac.createGain(), lp = ac.createBiquadFilter();
+  o.type = 'sawtooth'; o.frequency.value = mtof(midi);
+  lp.type = 'lowpass'; lp.Q.value = 4; lp.frequency.setValueAtTime(1600, t); lp.frequency.exponentialRampToValueAtTime(220, t + len * 0.8);
+  g.gain.setValueAtTime(0.32, t); g.gain.setValueAtTime(0.32, t + len * 0.7); g.gain.linearRampToValueAtTime(0, t + len);
+  o.connect(lp).connect(g).connect(out); o.start(t); o.stop(t + len + 0.02);
 }
 function hit(t, type, freq, q, v, len, dest = out) {
   const n = noise(), f = ac.createBiquadFilter(), g = ac.createGain();
@@ -383,25 +377,21 @@ function hit(t, type, freq, q, v, len, dest = out) {
   g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(1e-4, t + len);
   n.connect(f).connect(g).connect(dest); n.start(t); n.stop(t + len + 0.02);
 }
-function snareAt(t, hard) {
-  if (!hard) { for (let r = 0; r < 3; r++) hit(t + r * 0.008, 'bandpass', 1400, 1.2, 0.6, 0.12); return; }   // 電子のクラップ
-  hit(t, 'bandpass', 2200, 0.8, 0.9, 0.16, crushBus); hit(t, 'highpass', 5000, 0.7, 0.3, 0.08);
-  const o = ac.createOscillator(), g = ac.createGain(); o.type = 'triangle'; o.frequency.setValueAtTime(330, t); o.frequency.exponentialRampToValueAtTime(180, t + 0.05);
-  g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.08); o.connect(g).connect(crushBus); o.start(t); o.stop(t + 0.1);
-}
-// 金属っぽい電子音：矩形波を一瞬で下へすべらせる（「ピュン」）
-function zapAt(t, f, v) {
-  const o = ac.createOscillator(), g = ac.createGain(); o.type = 'square';
-  o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f / 4, t + 0.05);
-  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.05);
-  o.connect(g).connect(duck); o.start(t); o.stop(t + 0.06);
+// 電子のクラップ（ノイズを3回すこしずらして重ねる）
+function snareAt(t, v = 0.6) { for (let r = 0; r < 3; r++) hit(t + r * 0.006, 'bandpass', 1500, 1.4, v, 0.07); }
+// 電子のタム：サイン波をゆっくり下へすべらせる（「ポーン」）
+function tomAt(t, f, v) {
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * 0.45, t + 0.3);
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(1e-4, t + 0.3);
+  o.connect(g); g.connect(duck); o.start(t); o.stop(t + 0.32);
 }
 // シーケンサー：ノコギリ波を、レゾナンスの強いローパスで音ごとに開いて閉じる。cut で区間ごとの明るさを替える
 function seqAt(t, midi, cut) {
   const o = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain();
   o.type = 'sawtooth'; o.frequency.value = mtof(midi);
   f.type = 'lowpass'; f.Q.value = 9; f.frequency.setValueAtTime(cut * 4, t); f.frequency.exponentialRampToValueAtTime(cut, t + 0.09);
-  g.gain.setValueAtTime(0.13, t); g.gain.exponentialRampToValueAtTime(1e-3, t + ST * 0.95);
+  g.gain.setValueAtTime(0.13, t); g.gain.exponentialRampToValueAtTime(1e-3, t + ST * 0.5);   // 短く切って「ピッ」と鳴らす
   o.connect(f).connect(g).connect(duck); o.start(t); o.stop(t + ST);
 }
 // 矩形波のメロディ（飾りのない、おもちゃのような音）
@@ -409,34 +399,27 @@ function leadAt(t, midi, len) {
   const o = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain();
   o.type = 'square'; o.frequency.value = mtof(midi); f.type = 'lowpass'; f.frequency.value = 2600;
   g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.07, t + 0.005); g.gain.setValueAtTime(0.07, t + len * 0.8); g.gain.linearRampToValueAtTime(0, t + len);
-  o.connect(f).connect(g); g.connect(duck); g.connect(echo); o.start(t); o.stop(t + len + 0.02);
+  o.connect(f).connect(g); g.connect(duck); o.start(t); o.stop(t + len + 0.02);
 }
-// パッドとスーパーソウ。soft はゆっくり立ち上がるストリングス・マシン風（ノコギリ波2本・暗い）、そうでなければ7本の明るいスーパーソウ
-function chordAt(t, notes, len, soft) {
-  const f = ac.createBiquadFilter(), g = ac.createGain(), v = soft ? 0.03 : 0.022, att = soft ? len * 0.3 : 0.02;
-  f.type = 'lowpass'; f.frequency.value = soft ? 1300 : 7000; f.Q.value = 0.7;
+// ストリングス・マシン風のパッド（ノコギリ波2本・ゆっくり立ち上がる・暗い）
+function chordAt(t, notes, len, bright) {
+  const f = ac.createBiquadFilter(), g = ac.createGain(), v = 0.03, att = len * 0.3;
+  f.type = 'lowpass'; f.frequency.value = bright ? 2200 : 1300; f.Q.value = 0.7;
   g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(v, t + att); g.gain.setValueAtTime(v, t + len - 0.05); g.gain.linearRampToValueAtTime(0, t + len);
   f.connect(g).connect(duck);
-  for (const m of notes) for (let k = soft ? -1 : -3; k <= (soft ? 1 : 3); k += soft ? 2 : 1) {
-    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(m); o.detune.value = k * (soft ? 7 : 11);
+  for (const m of notes) for (const k of [-1, 1]) {
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(m); o.detune.value = k * 7;
     o.connect(f); o.start(t); o.stop(t + len + 0.02);
   }
 }
-// 声：ノコギリ波を2つの声の帯域（フォルマント）に通す。robot は低い決まった音程・ビブラートなし・ぶつ切り。
-// そうでなければ hyperpop のボーカルチョップ：高く、音の頭でしゃくり上げ、ビブラートをかける
+// ボコーダー風のロボットの声：ノコギリ波を2つの声の帯域（フォルマント）に通す。ビブラートなし・ぶつ切り
 const VOWELS = [[800, 1200], [350, 2300], [500, 900], [300, 2600], [320, 800]];   // あ・い・お・え・う
-function chopAt(t, midi, len, robot, vw = Math.random() * 4 | 0) {
-  const o = ac.createOscillator(), g = ac.createGain(), [f1, f2] = VOWELS[vw], v = robot ? 0.9 : 0.5;
-  o.type = 'sawtooth';
-  if (robot) o.frequency.value = mtof(midi);
-  else {
-    o.frequency.setValueAtTime(mtof(midi - 2), t); o.frequency.exponentialRampToValueAtTime(mtof(midi), t + 0.04);
-    const vib = ac.createOscillator(), vg = ac.createGain(); vib.frequency.value = 6.5; vg.gain.value = mtof(midi) * 0.012; vib.connect(vg).connect(o.frequency); vib.start(t); vib.stop(t + len + 0.02);
-  }
+function chopAt(t, midi, len, vw = Math.random() * 4 | 0) {
+  const o = ac.createOscillator(), g = ac.createGain(), [f1, f2] = VOWELS[vw], v = 0.9;
+  o.type = 'sawtooth'; o.frequency.value = mtof(midi);
   g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(v, t + 0.01); g.gain.setValueAtTime(v, t + len * 0.7); g.gain.linearRampToValueAtTime(0, t + len);
-  const sh = robot ? 1 : 1.5;   // チョップは声の帯域を上げて若くする
-  for (const [fq, gv] of [[f1 * sh, 1], [f2 * sh, 0.6]]) { const b = ac.createBiquadFilter(), bg = ac.createGain(); b.type = 'bandpass'; b.frequency.value = fq; b.Q.value = robot ? 14 : 9; bg.gain.value = gv; o.connect(b).connect(bg).connect(g); }
-  g.connect(duck); g.connect(echo);
+  for (const [fq, gv] of [[f1, 1], [f2, 0.6]]) { const b = ac.createBiquadFilter(), bg = ac.createGain(); b.type = 'bandpass'; b.frequency.value = fq; b.Q.value = 14; bg.gain.value = gv; o.connect(b).connect(bg).connect(g); }
+  g.connect(duck);
   o.start(t); o.stop(t + len + 0.02);
 }
 // E マイナー：Em7 Cmaj7 D Bm7
@@ -444,41 +427,45 @@ const CH = [[64, 67, 71, 74], [60, 64, 67, 71], [62, 66, 69, 74], [59, 62, 66, 6
 const SEQ = [0, 12, 0, 7, 0, 12, 0, 7, 0, 12, 7, 12, 19, 12, 7, 12];   // 根音からの距離（3度を避けて、どの和音にも合わせる）
 const LEAD = [71, -1, 71, -1, 74, -1, 76, -1, 79, -1, 78, -1, 76, -1, 74, -1, 71, -1, 71, -1, 74, -1, 76, -1, 74, -1, -1, -1, 71, -1, -1, -1];
 const HOOK = [83, -1, 79, 83, -1, 86, 83, 79, 78, -1, 76, -1, 78, 79, -1, -1, 83, -1, 79, 83, -1, 88, 86, 83, 79, -1, 78, 76, -1, 74, 76, -1];
-const ROBO = [0, -1, 1, -1, 2, -1, -1, -1, 4, -1, 3, -1, 2, -1, -1, -1];   // ロボットの声の母音（ア・イ・オ・・ウ・エ・オ）
+const COUNT = [[0, 0, 1], [6000, 0, 1], [1800, 0, 1], [4000, 1, 0]];   // 子音のノイズの高さ（0 はなし）と母音2つ：アイ（ンス）・ツヴァイ・ドライ・フィア
 const EKICK = [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0];   // エレクトロのキック：1拍目、2拍目の裏の16分、3拍目の裏とその次
 const CKICK = [1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0];   // サビは少し増やす
 const CUT = { intro: 350, verse: 700, chorus: 2200, break: 450, last: 3200 };
 function play(step, t) {
   const bar = Math.floor(step / 16), s = step % 16, sec = section(bar), k = bar % 4, big = sec === 'chorus' || sec === 'last';
   if (s === 0) events.push({ t, type: 'bar', bar, sec });
-  // パッド：サビはスーパーソウ（2拍ごと）、それ以外はストリングス
-  if (big ? s % 8 === 0 : s === 0) chordAt(t, CH[k], ST * (big ? 8 : 16), !big);
+  // パッド：Numbers のように上モノは薄く、ストリングス・マシンはブレイクだけ
+  if (s === 0 && sec === 'break') chordAt(t, CH[k], ST * 16, false);
   // シーケンサーはずっと鳴らし、前奏は小節ごとに少しずつ開く
   seqAt(t, ROOT[k] + 12 + SEQ[s], CUT[sec] * (sec === 'intro' ? 1 + (bar % 40) * 0.4 : 1));
   if (sec === 'verse') {
-    // A メロ：歪ませないキックでエレクトロの型、2・4拍にクラップ、16分のハットと裏の電子音
+    // A メロ：キックでエレクトロの型、2・4拍にクラップ、16分のハット、小節の終わりに電子のタム
     if (EKICK[s]) { kickAt(t, false); events.push({ t, type: 'kick', s }); }
-    if (s === 4 || s === 12) { snareAt(t, false); events.push({ t, type: 'snare' }); }
+    if (s === 4 || s === 12) { snareAt(t); events.push({ t, type: 'snare' }); }
     hit(t, 'highpass', 8000, 0.7, s % 4 === 2 ? 0.12 : 0.05, 0.03);
-    if (s === 7 || s === 15) zapAt(t, 3200, 0.05);
-    if (EKICK[s]) bassAt(t, ROOT[k] + (s === 11 ? 12 : 0), ST * (s === 10 ? 1 : 2), s === 11);
+    if (s === 15) tomAt(t, 220, 0.25);
+    if (EKICK[s]) bassAt(t, ROOT[k] + (s === 11 ? 12 : 0), ST * 0.8);   // ベースはキックと同じところで短く
     const n = LEAD[(bar % 2) * 16 + s]; if (n > 0 && bar >= 8) leadAt(t, n, ST * 1.8);   // メロディは後半の4小節から
   }
   if (big) {
-    // サビ：歪ませたキックでエレクトロの型（ラスサビは小節の終わりを16分で連打）、ビットクラッシュのスネア、キックに合わせてすべる 808、16分のハット
+    // サビ：キックでエレクトロの型（ラスサビは小節の終わりを16分で連打）、クラップ、8分のベース、16分のハット、ロボットの声がメロディを歌う
     if (CKICK[s] || (sec === 'last' && bar % 2 === 1 && s >= 13)) { kickAt(t, true); events.push({ t, type: 'kick', s }); }
-    if (s === 4 || s === 12) { snareAt(t, true); events.push({ t, type: 'snare' }); }
-    if (CKICK[s]) bassAt(t, ROOT[k] + (s === 3 || s === 11 ? 12 : 0), ST * 2, s === 3 || s === 11);
+    if (s === 4 || s === 12) { snareAt(t); events.push({ t, type: 'snare' }); }
+    if (CKICK[s]) bassAt(t, ROOT[k] + (s === 3 || s === 11 ? 12 : 0), ST * 0.8);
     hit(t, 'highpass', 8000, 0.7, s % 4 === 2 ? 0.16 : 0.07, 0.03);
-    // 4小節目の最後の拍は、チョップを32分で連打する（スタッター）
-    if (k === 3 && s >= 12) { for (let r = 0; r < 2; r++) chopAt(t + r * ST / 2, 83 + (s - 12) * 2, ST * 0.45, false, 0); events.push({ t, type: 'roll' }); }
-    else { const n = HOOK[(bar % 2) * 16 + s]; if (n > 0) { chopAt(t, n, ST * 1.6, false); events.push({ t, type: 'chop' }); } }
+    // 4小節目の最後の拍は、電子のタムを高いほうから順に鳴らす
+    if (k === 3 && s >= 12) { tomAt(t, [440, 330, 247, 185][s - 12], 0.3); events.push({ t, type: 'roll' }); }
+    else { const n = HOOK[(bar % 2) * 16 + s]; if (n > 0) { chopAt(t, n - 24, ST * 1.6); events.push({ t, type: 'chop' }); } }
   }
-  // ロボットの声：A メロとブレイク
-  if ((sec === 'verse' || sec === 'break') && ROBO[s] >= 0) { chopAt(t, 45, ST * 1.4, true, ROBO[s]); events.push({ t, type: 'chop' }); }
-  if (sec === 'intro' && bar % 40 >= 2 && s % 4 === 2) zapAt(t, 2600, 0.04);
+  // ロボットの声が拍ごとに数える（EINS ZWEI DREI VIER）：子音のノイズ、母音2つ。A メロとブレイク
+  if ((sec === 'verse' || sec === 'break') && s % 4 === 0) {
+    const [c, v1, v2] = COUNT[s >> 2];
+    if (c) hit(t, 'highpass', c, 1, 0.25, 0.04);
+    chopAt(t, 45 - (s >> 2), ST * 1.6, v1); chopAt(t + ST * 1.6, 45 - (s >> 2), ST * 1.2, v2); events.push({ t, type: 'chop' });
+  }
+  if (sec === 'intro' && bar % 40 >= 2 && s % 4 === 2) hit(t, 'highpass', 8000, 0.7, 0.08, 0.03);
   // ブレイクの最後の小節は、スネアの連打を細かくしながら上げる
-  if (sec === 'break' && bar % 40 === 23 && (s % 2 === 0 || s >= 8)) { snareAt(t, true); events.push({ t, type: 'roll' }); }
+  if (sec === 'break' && bar % 40 === 23 && (s % 2 === 0 || s >= 8)) { snareAt(t); events.push({ t, type: 'roll' }); }
 }
 
 // --- 映像 ---
