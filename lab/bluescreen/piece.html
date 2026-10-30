@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Blue Screen</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <label>RGB のずれ <input type="range" id="rgb" min="0" max="1" step="0.05" value="0.5"></label>
+  <label>グリッチの強さ <input type="range" id="glitch" min="0" max="1" step="0.05" value="0.8"></label>
+  <label><input type="checkbox" id="text" checked> 歌詞とカメラの表示</label>
+  <div id="msg"></div>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="90" value="70"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<canvas id="c"></canvas>
+
+<script>
+// 存在しない日本の hyperpop の歌手「ゆなちゃん1%」の嘘の MV「ブルースクリーンで恋をした」。
+// 曲は Gemini（Lyria 3.5）で作った 180BPM の hyperpop×ガバ。素材の動画5本を曲の区間に合わせて切り替え、VHS で崩し、
+// サビは色と反転、楽器だけの盛り上がりはデータモッシュとブルースクリーン、最後はブラウン管の電源が落ちるように消える
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+const glow = document.createElement('canvas'), gctx = glow.getContext('2d');     // 光：縮小してぼかした写し
+const prev = document.createElement('canvas'), pctx = prev.getContext('2d');     // データモッシュ：前のコマの写し（半分の大きさ）
+const off = document.createElement('canvas'), octx = off.getContext('2d');       // 電源が落ちるときの写し
+const grab = document.createElement('canvas'), gr = grab.getContext('2d', { willReadFrequently: true });
+const $ = id => document.getElementById(id), msg = $('msg');
+// 素材の動画5本を同時に流しておき、区間と小節で切り替える（1本につないでシークすると、キーフレームが遠くて止まる）
+const NAMES = ['bedroom', 'konbini', 'crossing', 'rooftop', 'bluescreen'];
+const vids = NAMES.map(n => Object.assign(document.createElement('video'), { src: `src/${n}.mp4`, muted: true, loop: true, playsInline: true }));
+let video = vids[4];
+let W, H, LW = 0, LH = 0;
+const setSize = () => {
+  [W, H] = $('aspect').value.split('x').map(Number);
+  c.width = off.width = W; c.height = off.height = H; glow.width = W / 4; glow.height = H / 4; prev.width = W / 2; prev.height = H / 2;
+};
+
+// --- 曲の地図 ---
+// テンポは 180BPM で一定。拍の位置とキックの時刻は librosa で曲から取った（キックは 35〜110Hz の立ち上がり）
+const BPM = 180, BEAT = 60 / BPM, BAR = BEAT * 4, T0 = 0.09;
+const KICKS = [0.10,0.25,0.56,0.77,0.91,1.04,1.21,1.43,1.61,1.90,2.10,2.25,2.40,2.56,2.76,2.94,3.09,3.27,3.43,3.58,3.76,3.93,5.41,5.60,5.80,6.42,6.65,6.78,7.08,7.21,7.36,7.58,7.79,7.92,8.08,8.21,8.37,8.60,8.91,9.10,9.21,9.34,9.75,10.01,10.25,10.43,10.75,10.88,11.06,11.21,11.75,11.88,12.42,12.54,12.92,13.42,13.59,13.92,14.09,14.42,14.58,15.08,15.25,15.42,15.57,15.76,16.08,16.21,16.37,17.08,17.21,17.75,17.88,18.00,18.25,18.57,18.75,18.88,19.06,19.19,19.57,19.75,20.01,20.41,20.67,21.45,21.68,21.96,22.24,22.42,22.57,22.89,23.03,23.19,23.33,23.59,23.95,24.35,24.57,24.70,25.07,25.41,25.56,25.75,26.34,26.59,26.76,27.25,27.74,27.91,28.31,28.58,28.90,29.05,29.24,29.42,29.59,29.91,30.40,30.57,30.85,31.06,31.25,31.56,31.90,32.10,32.24,32.45,32.58,32.76,32.91,33.10,33.25,33.44,33.56,33.70,33.86,34.01,34.30,34.43,34.61,34.77,35.03,35.25,35.39,35.73,35.91,36.10,36.33,36.49,36.92,37.09,37.24,37.44,37.60,37.77,37.95,38.10,38.24,38.41,38.60,38.76,38.93,39.11,39.23,39.42,39.58,39.77,40.10,40.26,40.43,40.59,40.77,40.93,41.08,42.08,42.26,42.42,42.76,43.02,43.22,43.43,43.60,43.76,43.92,44.09,44.27,44.42,44.61,44.77,44.93,45.09,45.27,45.43,45.58,45.76,45.90,46.10,46.35,46.59,46.76,46.96,47.10,47.35,47.58,47.83,48.10,48.43,48.55,48.76,49.09,49.26,49.43,49.61,49.77,49.94,50.10,50.26,50.44,50.60,50.77,51.10,51.22,51.43,51.59,51.76,51.92,52.10,52.74,53.43,53.58,53.76,53.94,54.10,54.32,54.63,54.76,54.97,55.10,55.27,55.43,55.58,55.76,55.92,56.10,56.25,56.43,56.63,56.76,56.99,57.27,57.43,57.61,57.76,57.97,58.10,58.25,58.76,59.09,59.22,59.43,59.59,59.76,59.92,60.10,60.27,60.43,60.61,60.77,60.93,61.09,61.27,61.43,61.73,61.89,62.09,62.26,62.44,62.59,62.77,64.10,64.34,66.76,67.01,67.14];
+// 歌詞と歌われている時刻（Demucs で声だけにして Whisper で書き起こした。Lyria が渡した歌詞を一部書き換えて歌っている）
+const LYRICS = [
+  [4.70, 9.76, 'システム残量 あと少し'],
+  [9.76, 14.88, '充電1% 夜はバグってる'],
+  [14.88, 20.30, '既読つかない ハートが砕ける'],
+  [20.30, 25.66, 'カウントダウンが始まるよ'],
+  [26.54, 30.98, 'おやすみなんて 言わないで'],
+  [31.90, 36.54, '画面の向こうで 叫んでる'],
+  [36.54, 39.84, 'ブルースクリーンで 恋をした'],
+  [39.84, 42.58, 'クラッシュさせてよ この夜を'],
+  [52.00, 53.40, '電池 切れました'],   // Whisper の行は 48.1 から始まるが、48 秒は短い合いの手で、歌は 52.0〜53.4（声だけの音量で見た）
+  [62.70, 64.05, 'おやすみ'],   // Whisper は 62.2 からだが、声が立ち上がるのは 62.75 あたり（声だけの音量で見た）
+];
+// 区間：前奏・A メロ（つぶやき）・カウントダウン・サビ（絶叫）・楽器だけの盛り上がり・終わり
+const INTRO = 4.7, VERSE = 20.3, COUNT = 26.5, CHORUS = 42.7, DROP = 62, OFF = 66.76;
+// サビの終わりのブレイク：40.9 でキックとベースが抜け、41.5〜41.65 はほぼ無音、42.7 でキックが戻る（低域の音量で見た）
+const BRK = 40.9, HOLE = 41.5, HOLE_END = 41.65;
+// 「電池 切れました」：52.15 でキックとベースが抜けて歌だけ残り、53.42 でキックが戻る
+const DEAD = 52.15, DEAD_END = 53.42;
+const part = t => t < INTRO ? 0 : t < VERSE ? 1 : t < COUNT ? 2 : t < CHORUS ? 3 : t < DROP ? 4 : 5;
+// 区間ごとの場面：0 部屋 1 コンビニ 2 交差点 3 屋上 4 青い画面
+function sceneAt(t, bar, beat) {
+  switch (part(t)) {
+    case 0: return 4;
+    case 1: return (bar >> 1) % 2;                          // 2小節ごとに部屋とコンビニ
+    case 2: return bar % 2 ? 0 : 1;                         // 1小節ごと
+    case 3: return t < 36.54 ? [2, 2, 3, 2][bar % 4] : [3, 0, 3, 4][bar % 4];   // 交差点で歌う2行は交差点を多めに
+    case 4: return [3, 2, 3, 1, 3, 2, 0, 4][(beat >> 1) % 8];   // 2拍ごと
+    default: return 4;
+  }
+}
+// 口合わせ：交差点の動画は Veo がサビの2行を歌っている（0〜3.3秒と 3.3〜7.4秒）。
+// 曲でその行が始まる時刻に頭出しし、行の長さに合わせて遅く流す。速さと位置は必ず組で変える（tools/render.py が位置を出し直せるように）
+const CUES = [[26.54, 2, 0, 3.30 / 4.44], [31.90, 2, 3.30, 4.08 / 4.64], [36.54, 2, null, 1]];   // [曲の時刻, 場面, 動画の位置（null はそのまま）, 速さ]
+let ci = 0;
+function cue([, i, pos, rate]) {
+  const v = vids[i], p = pos ?? v.currentTime;
+  v.playbackRate = rate; v.currentTime = p;
+}
+// 場面ごとの切り出し：交差点は Veo が下の方に字幕を焼き込んでしまうので、顔に寄って上の方だけ使う
+const CROP = { 2: { z: 1.3, py: -0.2 } };
+
+// --- 音 ---
+// 曲を AudioBuffer にして鳴らす（<audio> だと tools/render.py の、音をコマごとに止めながら進める書き出しで止まらない）
+// 曲はページを開いたときに読んでおく（押してから読むと、tools/render.py の書き出しで頭が遅れる）。AudioBuffer はどの AudioContext でも鳴らせる
+let ac, out, audioDest, buf, srcNode, t0 = 0, songReady = false;
+const songP = fetch('src/song.mp3').then(r => r.arrayBuffer()).then(b => new OfflineAudioContext(2, 1, 44100).decodeAudioData(b))
+  .then(b => { songReady = true; return b; }, () => { msg.textContent = 'file:// では曲を読めないので、ローカルサーバーで開いてください'; return null; });
+async function startAudio() {
+  if (ac) return ac.resume();
+  ac = new AudioContext();
+  vids.forEach(v => v.play());   // 素材の動画も音と一緒に始める
+  out = ac.createGain(); out.connect(ac.destination); out.connect(audioDest = ac.createMediaStreamDestination());
+  if (!(buf = await songP)) return;
+  restart();
+}
+// 曲の頭から鳴らし直す（録画のとき）。曲は繰り返す
+function restart() {
+  if (srcNode) srcNode.stop();
+  srcNode = ac.createBufferSource(); srcNode.buffer = buf; srcNode.loop = true; srcNode.connect(out);
+  t0 = ac.currentTime + 0.05; srcNode.start(t0);
+  reset();
+}
+// 曲の頭に戻ったときの片付け。期限（moshUntil・bsodUntil）は曲の中の秒数なので、残すと次の周の頭からずっと出てしまう
+function reset() {
+  vids.forEach(v => { v.playbackRate = 1; v.currentTime = 0; });
+  ki = 0; ci = 0; lastBeat = -1; lastT = 0;
+  moshUntil = bsodUntil = 0; inv = freeze = 0; kick = roll = px = 0; str = null; blocks.length = 0;
+}
+const songT = () => !buf || ac.currentTime < t0 ? 0 : (ac.currentTime - t0) % buf.duration;
+
+// --- VHS ---
+// 2026-11-06 ghostidol と同じ。行のずれ・トラッキングの帯・色のにじみ・色調・RGB のずれ。G はグリッチの強さ
+let Yr = new Float32Array(0), Ir = Yr, Qr = Yr, Rr = Yr, Br = Yr, roll = 0;
+function vhs(d, G, t) {
+  if (Yr.length !== LW) [Yr, Ir, Qr, Rr, Br] = [0, 0, 0, 0, 0].map(() => new Float32Array(LW));
+  const w = Math.sin(Math.PI * t), bh = LH * (0.02 + 0.02 * G);   // トラッキングの帯の高さ
+  const bands = [((t * 0.12) % 1.4 - 0.2) * LH]; if (G > 0.5) bands.push(((t * 0.31 + 0.5) % 1.4 - 0.2) * LH);
+  const R = 4 + Math.round(G * 3), CS = 2 + Math.round(G * 3);   // 色のぼかしの半径と、色のずれ（マス）
+  const S = +$('rgb').value, split0 = S * 5 + kick * S * 8;   // RGB のずれ（マス、1マス3px）。キックで広がる
+  const shake = 1 + G * 1.2, noise = 0.05 + G * 0.06;
+  roll *= 0.85; const ro = Math.round(roll);
+  for (let y = 0; y < LH; y++) {
+    const inBand = bands.some(b => Math.abs(y - b) < bh);
+    const o0 = Math.round(Math.sin(y * 0.04 + t * 2.5) * (0.6 + Math.abs(w)) * shake + kick * (Math.random() * 6 - 3) * shake + (inBand ? (Math.random() - 0.5) * (12 + 16 * G) : 0));
+    const r = y * LW, src = ((y + ro) % LH) * LW;
+    for (let x = 0; x < LW; x++) {
+      const i = (src + Math.min(LW - 1, Math.max(0, x - o0))) * 4, R0 = d[i] / 255, G0 = d[i + 1] / 255, B0 = d[i + 2] / 255;
+      Yr[x] = 0.299 * R0 + 0.587 * G0 + 0.114 * B0; Ir[x] = 0.596 * R0 - 0.274 * G0 - 0.322 * B0; Qr[x] = 0.211 * R0 - 0.523 * G0 + 0.312 * B0;
+    }
+    let si = 0, sq = 0;   // 色の移動平均（左から右へ）
+    for (let x = -R; x < LW; x++) {
+      const a = Math.min(LW - 1, Math.max(0, x + R)), b = Math.min(LW - 1, Math.max(0, x - R - 1));
+      si += Ir[a] - (x >= 1 ? Ir[b] : 0); sq += Qr[a] - (x >= 1 ? Qr[b] : 0);
+      const X = x + CS;
+      if (X < 0 || X >= LW) continue;
+      const n = Math.min(2 * R + 1, x + R + 1);
+      const Y = 0.05 + Yr[X] * 0.88 + (Math.random() - 0.5) * noise, I = si / n * 0.8, Q = sq / n * 0.8, o = (r + X) * 4;
+      Rr[X] = Math.min(255, (Y + 0.956 * I + 0.621 * Q) * 255 * 1.04);
+      d[o + 1] = (Y - 0.272 * I - 0.647 * Q) * 255;
+      Br[X] = (Y - 1.106 * I + 1.703 * Q) * 255 * 0.93;
+    }
+    const split = Math.round(split0 * (inBand ? 2 : 1));
+    for (let x = 0; x < LW; x++) { const o = (r + x) * 4; d[o] = Rr[Math.max(0, x - split)]; d[o + 2] = Br[Math.min(LW - 1, x + split)]; }
+  }
+}
+// 動画の今のコマを画面の比率で真ん中から切り抜いて 1/3 に縮め、VHS で崩す。z は寄り、px・py は横・縦のずらし（切り抜く幅・高さに対する割合）
+function sample(v, z, px, py, G, t) {
+  if (!W || v.readyState < 2) return false;
+  LW = W / 3 | 0; LH = H / 3 | 0;
+  if (grab.width !== LW || grab.height !== LH) { grab.width = LW; grab.height = LH; }
+  const vw = v.videoWidth, vh = v.videoHeight, s = Math.max(LW / vw, LH / vh) * z, cw = LW / s, ch = LH / s;
+  const x = Math.min(vw - cw, Math.max(0, (vw - cw) / 2 + px * cw));
+  const y = Math.min(vh - ch, Math.max(0, (vh - ch) / 2 + py * ch));
+  gr.drawImage(v, x, y, cw, ch, 0, 0, LW, LH);
+  let im;
+  try { im = gr.getImageData(0, 0, LW, LH); }
+  catch (e) { msg.textContent = 'file:// では動画の画素を読めないので、ローカルサーバーで開いてください'; return false; }
+  vhs(im.data, G, t); gr.putImageData(im, 0, 0);
+  return true;
+}
+
+// --- データモッシュ ---
+// 新しいコマを描かず、前のコマを 48px のブロックごとにずらして写し直す（I フレームが抜けて動きだけが残る感じ）。
+// ずれの向きはブロックごとの場で、キックで向きを替える。新しいコマは a の濃さでうっすらにじませる
+const MB = 48; let moshSeed = 0;
+function mosh(a) {
+  const B = MB * W / 1080;
+  for (let by = 0; by < H; by += B) for (let bx = 0; bx < W; bx += B) {
+    const f = Math.sin(bx * 0.004 + moshSeed) + Math.cos(by * 0.003 - moshSeed * 1.3);
+    if (Math.abs(f) < 0.5) continue;   // 止まっているブロックは前のコマのまま
+    const fx = Math.sin(by * 0.01 + moshSeed * 2) * B * 0.5 * f, fy = Math.cos(bx * 0.01 + moshSeed) * B * 0.35 * f;
+    ctx.drawImage(prev, (bx - fx) / 2, (by - fy) / 2, B / 2, B / 2, bx, by, B, B);
+  }
+  ctx.globalAlpha = a; ctx.drawImage(grab, 0, 0, W, H); ctx.globalAlpha = 1;
+}
+// 色をかぶせる（color の合成なので明るさは残る）
+function tint(a, c1, c2) {
+  const g = ctx.createLinearGradient(0, 0, W, H); g.addColorStop(0, c1); g.addColorStop(1, c2);
+  ctx.globalCompositeOperation = 'color'; ctx.globalAlpha = a; ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+// ピクセルの引き伸ばし：ある列（行）の1px を、そこから画面の端まで引き伸ばす
+function stretch(s) {
+  if (s.vert) ctx.drawImage(c, 0, s.p, W, 1, 0, s.p, W, H - s.p);
+  else ctx.drawImage(c, s.p, 0, 1, H, s.p, 0, W - s.p, H);
+}
+function bloom(strength) {
+  gctx.filter = 'blur(8px)'; gctx.globalCompositeOperation = 'copy';
+  gctx.drawImage(c, 0, 0, glow.width, glow.height);
+  ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = strength; ctx.drawImage(glow, 0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+
+// --- 文字 ---
+const JP = '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif';
+// 白い字に黒い影、R・G・B を少しずつずらして足し算で重ねる（重なったところだけ白くなる）
+function rgbText(s, x, y, size, dx, font = 'bold') {
+  ctx.font = `${font} ${size}px "Arial", ${JP}`;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillText(s, x + size * 0.06, y + size * 0.06);
+  ctx.globalCompositeOperation = 'lighter';
+  for (const [col, o] of [['#f00', -dx], ['#0f0', 0], ['#00f', dx]]) { ctx.fillStyle = col; ctx.fillText(s, x + o, y); }
+  ctx.globalCompositeOperation = 'source-over';
+}
+// カラオケの1行：太い縁取りの白い字が、歌に合わせて左から色が変わっていく。幅に収まらなければ縮める
+function karaokeLine(s, x, y, size, align, p) {
+  ctx.font = `900 ${size}px ${JP}`;
+  const max = W - 120 * W / 1080; let w = ctx.measureText(s).width;
+  if (w > max) { size *= max / w; ctx.font = `900 ${size}px ${JP}`; w = max; }
+  ctx.textAlign = align; ctx.lineJoin = 'round';
+  const x0 = align === 'left' ? x : x - w;
+  ctx.lineWidth = size * 0.22; ctx.strokeStyle = '#06123a'; ctx.strokeText(s, x, y);
+  ctx.fillStyle = '#fff'; ctx.fillText(s, x, y);
+  if (p <= 0) return;
+  ctx.save(); ctx.beginPath(); ctx.rect(x0 - size, y - size * 1.2, size + w * Math.min(1, p), size * 2); ctx.clip();
+  ctx.strokeStyle = '#fff'; ctx.strokeText(s, x, y); ctx.fillStyle = '#1f6bff'; ctx.fillText(s, x, y);
+  ctx.restore();
+}
+// 今の行と次の行。偶数番目の行は上で左寄せ、奇数番目は下で右寄せ。次の行は6秒前から出しておく
+function karaoke(t) {
+  const u = W / 1080, m = 60 * u, y = H - 384 * u, gap = 170 * u, size = 66 * u;
+  ctx.textBaseline = 'alphabetic';
+  LYRICS.forEach(([a, b, s], i) => {
+    const before = i === 0 || LYRICS[i - 1][1] <= t;
+    if (t > b + 0.8 || t < a - 6 || !before && t < a) return;
+    const top = i % 2 === 0, p = (t - a) / (b - a) * 1.05;
+    karaokeLine(s, top ? m : W - m, top ? y : y + gap, size, top ? 'left' : 'right', p);
+  });
+}
+// 前奏のタイトルカード
+function title(t, split) {
+  const u = W / 1080, y = H * 0.4;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  karaokeLine('ブルースクリーンで', W / 2, y, 110 * u, 'center', 0);
+  karaokeLine('恋をした', W / 2, y + 140 * u, 150 * u, 'center', 0);
+  ctx.textAlign = 'center';
+  rgbText('BLUE SCREEN LOVE', W / 2, y + 230 * u, 52 * u, split);
+  rgbText('♪ ゆなちゃん1%', W / 2, y + 310 * u, 46 * u, split);
+  rgbText('作詞 Gemini · 作曲 Lyria · 映像 Veo', W / 2, y + 375 * u, 32 * u, split * 0.7, 'normal');
+}
+// カメラの表示：REC、電池（1%、赤で点滅）
+function hud(t, split) {
+  const u = W / 1080, m = 56 * u;
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  rgbText(t % 1 < 0.6 ? '● REC' : '', m, m, 46 * u, split, 'normal');
+  const bx = W - m - 110 * u, by = m + 4 * u, low = t % 0.5 < 0.3;
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 4 * u; ctx.strokeRect(bx, by, 96 * u, 40 * u); ctx.fillStyle = '#fff'; ctx.fillRect(bx + 96 * u, by + 12 * u, 8 * u, 16 * u);
+  if (low) { ctx.fillStyle = '#ff2030'; ctx.fillRect(bx + 6 * u, by + 6 * u, 8 * u, 28 * u); }
+  ctx.textAlign = 'right'; rgbText('1%', bx - 14 * u, m, 46 * u, split, 'normal');
+  if (part(t) === 4 && low) { ctx.textAlign = 'center'; rgbText('!! LOW BATTERY !!', W / 2, m + 90 * u, 54 * u, split * 2); }
+}
+// ブルースクリーン（嘘の文面）。p は進み具合の %
+function bsod(p, split) {
+  const u = W / 1080, m = 90 * u;
+  ctx.fillStyle = '#0b3fd8'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#fff';
+  ctx.font = `300 ${260 * u}px "Arial", ${JP}`; ctx.fillText(':(', m, H * 0.22);
+  ctx.font = `500 ${54 * u}px ${JP}`;
+  ['こころで問題が発生したため、', '再起動する必要があります。', '', 'おやすみの準備をしています。'].forEach((s, i) => ctx.fillText(s, m, H * 0.22 + 330 * u + i * 80 * u));
+  ctx.font = `500 ${54 * u}px ${JP}`; ctx.fillText(`${Math.min(100, p | 0)}% 完了`, m, H * 0.22 + 680 * u);
+  ctx.font = `400 ${30 * u}px "Arial", ${JP}`; ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.fillText('停止コード: HEART_NOT_RESPONDING', m, H * 0.22 + 790 * u);
+  if (split) { ctx.globalAlpha = 0.25; ctx.drawImage(c, split, 0); ctx.globalAlpha = 1; }   // 少しずらして重ね、にじませる
+}
+
+// --- ブレイク ---
+// 歌詞「クラッシュさせてよ この夜を」に合わせて、画面が固まったパソコンのように止まる。
+// 止まったコマが白黒になりながら白くかすみ、音の穴で一瞬真っ黒、そこから止まったコマに寄っていき揺れが大きくなる
+function breakFrame(t) {
+  if (t >= HOLE && t < HOLE_END) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H); return; }
+  const g = Math.min(1, (t - BRK) / (HOLE - BRK)), k = t < HOLE ? 0 : (t - HOLE_END) / (CHORUS - HOLE_END);
+  const z = 1 + k * 0.6, sh = k * k * 40 * W / 1080;
+  ctx.filter = `grayscale(${g}) contrast(${1 + k * 0.6})`;
+  ctx.drawImage(grab, (LW - LW / z) / 2, (LH - LH / z) / 2, LW / z, LH / z, (Math.random() - 0.5) * sh, (Math.random() - 0.5) * sh, W, H);
+  ctx.filter = 'none';
+  ctx.fillStyle = `rgba(255,255,255,${0.45 * g * (1 - k * 0.6)})`; ctx.fillRect(0, 0, W, H);   // 応答なしの白いかすみ
+}
+// 古い Windows 風のエラーの窓。曲の歌詞と設定にちなんだもの [タイトル, 本文, ボタン]
+const DIALOGS = [
+  ['ゆなちゃん1%.exe', '⚠ ゆなちゃん1% は応答していません。', ['閉じる', '待つ']],
+  ['バッテリー残量低下', '🔋 残り 1% です。電源につないでください。', ['OK']],
+  ['既読.exe', '✕ 既読がつきませんでした。', ['再試行', 'キャンセル']],
+  ['おやすみ.dll', '✕ おやすみ.dll が見つかりません。', ['OK']],
+  ['heart.sys', '⚠ ハートが砕けました。', ['OK']],
+  ['夜.exe', '？ この夜をクラッシュしますか？', ['はい', 'はい']],
+];
+const hash = i => { const s = Math.sin(i * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };   // 窓ごとに決まった 0〜1（書き出すたびに同じ並びにする）
+function hangWindow(x, y, w, u, [title, body, btns] = DIALOGS[0]) {
+  const h = 230 * u, tb = 46 * u;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(x + 10 * u, y + 10 * u, w, h);
+  ctx.fillStyle = '#d4d0c8'; ctx.fillRect(x, y, w, h);
+  const g = ctx.createLinearGradient(x, 0, x + w, 0); g.addColorStop(0, '#0a246a'); g.addColorStop(1, '#a6caf0');
+  ctx.fillStyle = g; ctx.fillRect(x + 4 * u, y + 4 * u, w - 8 * u, tb);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+  ctx.font = `bold ${28 * u}px ${JP}`; ctx.fillText(title, x + 16 * u, y + 4 * u + tb / 2);
+  ctx.fillStyle = '#000'; ctx.font = `500 ${30 * u}px ${JP}`;
+  ctx.fillText(body, x + 24 * u, y + 100 * u, w - 48 * u);
+  btns.forEach((s, j) => {
+    const bw = w * 0.26, bh = 50 * u, bx = x + w / 2 + (j - btns.length / 2) * (bw + 20 * u) + 10 * u, by = y + 150 * u;
+    ctx.fillStyle = '#fff'; ctx.fillRect(bx, by, bw, bh); ctx.fillStyle = '#808080'; ctx.fillRect(bx + 3 * u, by + 3 * u, bw - 3 * u, bh - 3 * u);
+    ctx.fillStyle = '#d4d0c8'; ctx.fillRect(bx + 3 * u, by + 3 * u, bw - 6 * u, bh - 6 * u);
+    ctx.fillStyle = '#000'; ctx.textAlign = 'center'; ctx.fillText(s, bx + bw / 2, by + bh / 2); ctx.textAlign = 'left';
+  });
+}
+// 固まっているあいだはタイトルバーと待ちの輪、音の穴のあとはエラーの窓が 32 分ごとに斜めに積み重なる
+function breakOverlay(t) {
+  const u = W / 1080;
+  if (t >= HOLE && t < HOLE_END) return;
+  if (t < HOLE) {
+    const g = ctx.createLinearGradient(0, 0, W, 0); g.addColorStop(0, '#0a246a'); g.addColorStop(1, '#a6caf0');
+    ctx.fillStyle = g; ctx.fillRect(0, 130 * u, W, 56 * u);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = `bold ${30 * u}px ${JP}`;
+    ctx.fillText('ゆなちゃん1%.exe（応答なし）', 24 * u, 158 * u);
+    for (let i = 0; i < 8; i++) {   // 待ちの輪：8つの点が回る
+      const a = i / 8 * Math.PI * 2 + t * 8, r = 44 * u;
+      ctx.fillStyle = `rgba(30,30,30,${(i + 1) / 8})`; ctx.beginPath();
+      ctx.arc(W / 2 + Math.cos(a) * r, H * 0.45 + Math.sin(a) * r, 9 * u, 0, Math.PI * 2); ctx.fill();
+    }
+    return;
+  }
+  // 偶数番目は「応答していません」の窓を左上から斜めに積み、奇数番目はほかの窓を画面のあちこちに散らす。
+  // 窓は画面からはみ出さない。キックが戻るころには画面が窓で埋まる
+  const n = Math.min(44, Math.floor((t - HOLE_END) / (BEAT / 8)) + 1), h = 230 * u;
+  for (let i = 0; i < n; i++) {
+    if (i % 2 === 0) {
+      const k = i / 2, w = W * 0.7, per = Math.floor((H * 0.85 - h) / (44 * u)), r = k % per, col = Math.floor(k / per);
+      hangWindow(Math.min(W - w, W * 0.02 + r * 14 * u + col * 60 * u), H * 0.06 + r * 44 * u, w, u);
+    } else {
+      const w = W * (0.55 + 0.25 * hash(i + 0.3));
+      hangWindow(hash(i) * (W - w), H * 0.04 + hash(i + 0.7) * (H * 0.88 - h), w, u, DIALOGS[1 + Math.floor(hash(i + 0.9) * (DIALOGS.length - 1))]);
+    }
+  }
+}
+
+// --- 電池切れ ---
+// 数コマちらついて暗くなり、ほぼ真っ黒の画面に空の電池と充電のしるし。残りの赤い線は拍ごとに点滅する
+function deadFrame(t) {
+  const u = W / 1080, d = t - DEAD;
+  if (d < 0.25) {   // 電圧が落ちたような明滅
+    if (Math.floor(d * 30) % 3 !== 1) { ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.fillRect(0, 0, W, H); }
+    return;
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.94)'; ctx.fillRect(0, 0, W, H);
+  const bw = 360 * u, bh = 170 * u, x = (W - bw) / 2, y = H * 0.4 - bh / 2;
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 12 * u; ctx.strokeRect(x, y, bw, bh);
+  ctx.fillStyle = '#fff'; ctx.fillRect(x + bw + 6 * u, y + bh * 0.3, 22 * u, bh * 0.4);
+  if (Math.floor((t - T0) / BEAT) % 2 === 0) { ctx.fillStyle = '#ff2030'; ctx.fillRect(x + 18 * u, y + 18 * u, 26 * u, bh - 36 * u); }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = `bold ${80 * u}px ${JP}`; ctx.fillStyle = '#fff';
+  ctx.fillText('⚡', W / 2, y + bh + 120 * u);
+}
+
+// --- 映像 ---
+let kick = 0, lastBeat = -1, ki = 0, lastT = 0, moshUntil = 0, freeze = 0, inv = 0, bsodUntil = 0, px = 0, still = false, lastAC = -1;
+const blocks = [];   // ブロックずれ：画面の矩形を何コマかずらして残す
+let str = null;
+function onBeat(t, beat) {
+  const bar = beat >> 2, P = part(t), G = +$('glitch').value;
+  video = vids[sceneAt(t, bar, beat)];
+  if (beat % 4 === 0) {   // 小節の頭
+    if (P === 3 && t < BRK) inv = 2;   // サビは小節の頭で反転（ブレイクは固まったままにする）
+    if (P === 4) {
+      const k = (t - CHORUS) / (DROP - CHORUS);   // 盛り上がりの中の位置（0〜1）
+      if (Math.random() < 0.3 + k * 0.6) moshUntil = t + BAR * (k > 0.6 ? 1 : 0.5);   // 後ろほどよく、長く溶かす
+      if (bar % 4 === 3 || t > DROP - BAR) bsodUntil = t + (t > DROP - BAR ? BAR : BEAT * 2);   // 4小節ごとと最後の小節はブルースクリーン
+    }
+  }
+  if (P >= 3 && P < 5) px = (Math.random() - 0.5) * 0.3 * G;   // サビ以降は拍で横にずらす
+  if (P === 2 && t > COUNT - BAR) inv = 2;   // カウントダウンの最後の小節は拍ごとに反転
+}
+function onKick(t) {
+  const P = part(t), G = +$('glitch').value;
+  kick = 1; moshSeed += 1 + Math.random() * 2;
+  if (P < 3) return;
+  if (Math.random() < G * 0.25) freeze = 2 + (Math.random() * 3 | 0);   // コマ止め
+  for (let i = 0; i < (P === 4 ? 2 + G * 5 : G * 3); i++) blocks.push({ x: Math.random() * W, y: Math.random() * H, w: 80 + Math.random() * 400, h: 20 + Math.random() * 160, dx: (Math.random() - 0.5) * 200, dy: (Math.random() - 0.5) * 60, life: 2 + (Math.random() * 5 | 0) });
+  if (Math.random() < G * (P === 4 ? 0.4 : 0.15)) str = { vert: Math.random() < 0.3, p: Math.random() * W * 0.7 + W * 0.15, life: 2 + (Math.random() * 4 | 0) };
+  if (Math.random() < G * 0.3) roll = LH * (0.05 + Math.random() * 0.15);
+}
+
+function frame() {
+  requestAnimationFrame(frame);
+  // 音の時刻が進んでいないあいだ（始める前・一時停止中）は、1コマ描いたら止めておく。
+  // ac.state では見ない（tools/render.py は音をコマごとに suspend しながら進める）
+  if (still && (!ac || ac.currentTime === lastAC)) return;
+  lastAC = ac ? ac.currentTime : -1;
+  const t = songT();
+  if (t < lastT - 1) reset();   // 曲が頭に戻った
+  lastT = t;
+  while (ci < CUES.length && CUES[ci][0] <= t) cue(CUES[ci++]);
+  const beat = Math.floor((t - T0) / BEAT);
+  if (beat !== lastBeat && beat >= 0) { lastBeat = beat; onBeat(t, beat); }
+  while (ki < KICKS.length && KICKS[ki] <= t) onKick(KICKS[ki++]);
+  kick *= 0.82;
+
+  const P = part(t), G0 = +$('glitch').value, split = (+$('rgb').value * 6 + kick * 8) * W / 1080;
+  // グリッチの強さ：A メロは弱く、カウントダウンで上げていき、サビ以降は強く
+  const G = G0 * [0.4, 0.35, 0.35 + 0.6 * (t - VERSE) / (COUNT - VERSE), 0.9, 1, 0.6][P];
+  // 寄り：A メロは2小節かけてゆっくり寄る。サビ以降はキックで一瞬寄る
+  const barT = ((t - T0) % (BAR * 2) + BAR * 2) % (BAR * 2) / (BAR * 2);
+  const cr = CROP[vids.indexOf(video)] || { z: 1, py: 0 };
+  const z = cr.z * (1 + (P <= 2 ? barT * 0.12 : 0.06 + kick * 0.08));
+  const brk = t >= BRK && t < CHORUS;
+  if (brk) { blocks.length = 0; str = null; }   // ブレイクのあいだはコマを止める（grab を描き替えない）
+  else if (freeze > 0) freeze--;
+  else if (!sample(video, z, P >= 3 ? px : 0, cr.py, G, t)) return;
+  still = true;
+
+  ctx.imageSmoothingEnabled = true;
+  if (brk) breakFrame(t); else if (t < moshUntil) mosh(0.08); else ctx.drawImage(grab, 0, 0, W, H);
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]; ctx.drawImage(c, b.x, b.y, b.w, b.h, b.x + b.dx, b.y + b.dy, b.w, b.h);
+    if (--b.life <= 0) blocks.splice(i, 1);
+  }
+  if (str) { stretch(str); if (--str.life <= 0) str = null; }
+  // 走査線、区間ごとの色、周りを暗くするにじみ
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 2);
+  if (P === 0 || P === 5) tint(0.6, '#0b3fd8', '#2a8cff');          // 青い画面の場面はもっと青く
+  else if (P === 3) tint(0.35 + kick * 0.2, '#ff1cc8', '#1cd2ff');   // サビはピンクと水色
+  else if (P === 4) tint(0.3 + (t < moshUntil ? 0.4 : 0), '#2a1cff', '#ff1cc8');
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.7);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.6)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+  const dead = t >= DEAD && t < DEAD_END;
+  if (t < bsodUntil && !dead) bsod((t - CHORUS) / (DROP - CHORUS) * 100, split);
+  if (brk) breakOverlay(t);
+  if (dead) deadFrame(t);
+  if ($('text').checked) {
+    if (!dead) hud(t, split);   // 電池切れのあいだはカメラの表示も消える
+    if (P === 0) title(t, split); else karaoke(t);
+    // カウントダウンの最後の3拍：3・2・1
+    const n = Math.ceil((COUNT - t) / BEAT);
+    if (P === 2 && n >= 1 && n <= 3) { ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; rgbText(String(n), W / 2, H * 0.45, 420 * W / 1080, split * 3, '900'); }
+  }
+  if ([CHORUS, DEAD_END].some(a => t >= a && t < a + 0.1)) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H); }   // キックが戻る瞬間に白く光る
+  if (inv > 0) { inv--; ctx.globalCompositeOperation = 'difference'; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H); ctx.globalCompositeOperation = 'source-over'; }
+  pctx.drawImage(c, 0, 0, prev.width, prev.height);   // 次のコマのデータモッシュに使う写し
+  bloom(0.2 + kick * 0.25 + (P === 3 ? 0.15 : 0));
+  if (t >= OFF) powerOff(t - OFF);
+}
+// ブラウン管の電源が落ちる：0.25秒で縦に潰れて白い横線になり、0.25秒で横に縮んで点になり、消える
+function powerOff(d) {
+  octx.drawImage(c, 0, 0);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  if (d > 0.9) return;
+  const sy = Math.max(0.004, 1 - d / 0.25), sx = d < 0.25 ? 1 : Math.max(0.01, 1 - (d - 0.25) / 0.25);
+  const w = W * sx, h = H * sy, a = d < 0.5 ? 1 : 1 - (d - 0.5) / 0.4;
+  ctx.globalAlpha = a; ctx.drawImage(off, (W - w) / 2, (H - h) / 2, w, h);
+  ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = `rgba(255,255,255,${Math.min(1, d * 4) * a})`;
+  ctx.fillRect((W - w) / 2, H / 2 - 3, w, 6); ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+
+$('aspect').onchange = setSize; setSize();
+requestAnimationFrame(frame);
+vids.forEach(v => { v.onloadeddata = () => { if (ac) v.play(); }; });   // 音を始めるまでは最初のコマで止めておく
+$('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+
+$('rec').onclick = async e => {
+  await startAudio(); if (!buf) return; restart();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(window.lastBlob = new Blob(chunks, { type }));
+    a.download = `bluescreen_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), $('dur').value * 1000);
+};
+</script>
+
+</body>
+</html>
