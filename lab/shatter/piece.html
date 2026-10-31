@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>shatter</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden}
+canvas{display:block;width:100vw;height:100vh}
+#hud{position:fixed;left:8px;bottom:8px;font:12px/1.5 monospace;color:#fff;background:#000a;padding:6px 8px;white-space:pre;pointer-events:none}
+</style></head><body>
+<canvas id="c"></canvas><div id="hud" hidden></div>
+<div id="panel" hidden><button id="play">play</button></div>
+<script>
+// サイト（verytired.net の player.html）の中では、再生と一時停止はバーがする（Space もバーが受ける）。MIDI の許可も聞かない
+const embedded = window !== top;
+// ノブ 1〜6（すべて 0..1）：音を変えると、対応する映像も一緒に変わる
+const KNOBS = [
+  ['padCut', '金属パッドのフィルター', '背景の明るさ・くっきり'],
+  ['padRes', 'レゾナンスと金属っぽさ（パッド・スタブ）', '塊の輪郭の光'],
+  ['delayFb', 'ディレイの返り', '輪郭の写しの数'],
+  ['hats', 'クリックの数', '粒と横線'],
+  ['stabs', '金属音の数', '背景に残る塊の跡'],
+  ['reverb', 'リバーブ', '残像の長さ'],
+];
+const P = {padCut: .5, padRes: .3, delayFb: .5, hats: .2, stabs: .3, reverb: .4};
+let grindCut = .4, grindRes = .5;
+// kick / burst は外から来た MIDI ノート用。ブラウザの中の曲は、鳴っている音の大きさ（L）で映像を動かす
+let kick = 0, burst = 0, flash = 0, hueJump = 0, phase = 0, phaseTo = 0, t = 0, rt = 0, ms = 1, midi = 'MIDI: 未接続', last = '-';
+
+function shape(hue) { // 塊の形を変える（hue を渡すと色も変える）
+  phaseTo += .8 + Math.random();
+  if (hue !== undefined) hueJump = hue;
+}
+function noteOn(note, vel) {
+  kick = Math.max(kick, vel / 127);
+  if (vel > 100) burst = 1;
+  shape((note % 12) / 12);
+  last = `note ${note} vel ${vel}`;
+}
+
+// 音：ブラウザの中で鳴らす 170 BPM のグリッチなブレイクビーツ（DnB / ブレイクコアの骨組みに、連打・切り貼り・グラニュラー・フィル）
+let crush = {}, combs = {}, granNode, ac, comp, master, padBus, padFilter, verb, delay, fbk, grindFilter, grindGain, grindOscs, grindPat = [], noiseBuf,
+  playing = false, step = 0, nextTime = 0, bpm = 170;
+// トラック：フェーダー 1〜8 が音量、M ボタン 1〜8 がミュート（8 はマスター）
+const TRACKS = ['kick', 'hat', 'sub', 'pad', 'stab', 'grind', 'perc', 'master'];
+const vol = TRACKS.map(() => .8), muted = TRACKS.map(() => false), bus = {};
+const on = name => !muted[TRACKS.indexOf(name)];
+function mix() {
+  if (ac) TRACKS.forEach((k, i) => bus[k].gain.setTargetAtTime(muted[i] ? 0 : vol[i], ac.currentTime, .02));
+}
+// A3 からの半音：Am9 → Fmaj9 → Dm9 → Em7
+const CHORDS = [[0, 3, 7, 10, 14], [-4, 0, 3, 7, 10], [-7, -4, 0, 3, 7], [-5, -2, 2, 5, 10]];
+const ROOTS = [0, -4, -7, -5];
+// ゴリゴリしたベースのフレーズ：音（ルートからの半音）、アクセント、次の音へのスライド
+const GRIND = [0, 0, 0, -2, 3, 5, 7, 12];
+const newGrind = () => grindPat = Array.from({length: 16}, () => Math.random() < .6 ? {
+  n: GRIND[Math.random() * GRIND.length | 0], acc: Math.random() < .3, slide: Math.random() < .5} : null);
+// パターン：ステップごとに {th: 鳴るしきい値, r: 1 ステップ中の連打数, x: 音色の乱数}。
+// th < 密度 のステップだけ鳴る（ハットとスタブはノブで密度が変わるので、増やしても元のリズムは残る）
+const DENS = {kick: .5, sub: .3, pad: .45, perc: .2};
+const ROLL = {kick: 1, hat: 8, sub: 3, pad: 2, stab: 3, perc: 6};
+let pat = {};
+const newTrack = k => pat[k] = Array.from({length: 16}, () => ({
+  th: Math.random(), r: Math.random() < .25 ? 2 + (Math.random() * (ROLL[k] - 1) | 0) : 1, x: Math.random()}));
+// キックとスネアは DnB の 2 ステップを骨組みにする（キック 1 拍目と 3 拍目の裏あたり、スネア 2・4 拍目）。スネアの間は連打するゴースト
+const KICKS = [[0, 10], [0, 6, 10], [0, 10, 11], [0, 7, 10], [0, 3, 10], [0, 2, 10, 14]];
+function newBreak() {
+  const ks = KICKS[Math.random() * KICKS.length | 0];
+  pat.kick.forEach((e, i) => e.th = ks.includes(i) ? 0 : 1);
+  pat.perc.forEach((e, i) => { if (i === 4 || i === 12) { e.th = 0; e.r = 1; } else if (i === 0 || ks.includes(i)) e.th = 1; });
+}
+const newStabs = () => { Object.keys(ROLL).forEach(newTrack); newBreak(); newGrind(); };
+newStabs();
+
+// 鳴っている音の大きさ（0..1）。トラックの音量の後で測るので、ミュートや音量もそのまま映像に出る
+const L = {kick: 0, hat: 0, sub: 0, pad: 0, stab: 0, grind: 0, perc: 0, dly: 0};
+// 大きさを 0..1 にそろえる倍率（音量 0.8 で鳴らした最大値の逆数くらい）。ponytail: 音色や初期音量を変えたら測り直す
+const GAIN = {kick: 2.4, hat: 26, sub: 3.9, pad: 10, stab: 3.1, grind: 7, perc: 2.3, dly: 4.3};
+const an = {}, abuf = new Float32Array(2048), wave = new Uint8Array(2048).fill(128);
+function measure(dt) {
+  for (const k in an) {
+    const n = an[k].fftSize;
+    an[k].getFloatTimeDomainData(abuf.subarray(0, n));
+    let s = 0;
+    for (let i = 0; i < n; i++) s += abuf[i] * abuf[i];
+    // パッドはキックで沈むので、ゆっくり下げて背景の色がちらつかないようにする
+    L[k] = Math.max(Math.min(Math.sqrt(s / n) * GAIN[k], 1), L[k] * Math.exp(-dt * (k === 'pad' ? 1.5 : 10)));
+  }
+  an.grind.getByteTimeDomainData(wave);
+}
+
+function audio() {
+  if (!ac) {
+    ac = new AudioContext();
+    comp = ac.createDynamicsCompressor(); comp.connect(ac.destination);
+    master = ac.createGain(); master.connect(comp);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    // リバーブ：減衰するノイズを残響として使う。verb はリバーブへの入口（量はノブ 6）
+    const len = ac.sampleRate * 4, ir = ac.createBuffer(2, len, ac.sampleRate);
+    for (let ch = 0; ch < 2; ch++) { const x = ir.getChannelData(ch); for (let i = 0; i < len; i++) x[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 3; }
+    const conv = ac.createConvolver(); conv.buffer = ir;
+    verb = ac.createGain(); verb.connect(conv).connect(master);
+    // ディレイ：付点8分、こもらせながら繰り返す（返りはノブ 3）
+    delay = ac.createDelay(2);
+    fbk = ac.createGain(); const lp = ac.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 1800;
+    delay.connect(lp).connect(fbk).connect(delay); lp.connect(master); lp.connect(verb);
+    // トラックごとの音量。リバーブとディレイへはトラックの音量の後から送るので、ミュートすると響きも止まる
+    for (const k of TRACKS) { if (k === 'master') bus[k] = master; else { bus[k] = ac.createGain(); bus[k].connect(master); } }
+    const send = (from, to, amt) => { const g = ac.createGain(); g.gain.value = amt; from.connect(g).connect(to); };
+    send(bus.hat, delay, .3); send(bus.stab, delay, .7); send(bus.stab, verb, .3);
+    send(bus.perc, verb, .7); send(bus.perc, delay, .3); send(bus.grind, delay, .25); send(bus.pad, verb, .8);
+    // パッドはみんなで1つのフィルターを通す（ノブ 1・2）。padBus はキックで沈ませる用
+    padFilter = ac.createBiquadFilter(); padFilter.type = 'lowpass';
+    padBus = ac.createGain();
+    for (const k of ['hat', 'stab', 'perc']) crush[k] = crusher(bus[k]);
+    for (const k of ['stab', 'perc']) { combs[k] = comb(bus[k]); crush[k].connect(combs[k]); }
+    padFilter.connect(padBus).connect(bus.pad);
+    // ベース：少しずらした2本のノコギリ波と1オクターブ下の矩形波を鳴らしっぱなしにして、フィルターの後で強く歪ませる
+    grindOscs = [[1, 'sawtooth'], [1.012, 'sawtooth'], [.5, 'square']].map(([r, type]) => { const o = ac.createOscillator(); o.type = type; o.r = r; return o; });
+    const drive = ac.createWaveShaper(), dc = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) dc[i] = Math.tanh((i / 511.5 - 1) * 6);
+    drive.curve = dc;
+    grindFilter = ac.createBiquadFilter(); grindFilter.type = 'lowpass';
+    grindGain = ac.createGain(); grindGain.gain.value = 0;
+    for (const o of grindOscs) { o.connect(grindFilter); o.start(); }
+    grindFilter.connect(drive).connect(grindGain).connect(bus.grind);
+    // 映像のために、トラックごとの音とディレイ・リバーブの返りを測る
+    const taps = {kick: bus.kick, hat: bus.hat, sub: bus.sub, pad: bus.pad, stab: bus.stab, grind: bus.grind, perc: bus.perc, dly: lp};
+    for (const k in taps) { an[k] = ac.createAnalyser(); an[k].fftSize = k === 'grind' ? 2048 : 512; taps[k].connect(an[k]); }
+    // 録音：コンプの後の音（スピーカーに出る音そのもの）を AudioWorklet で受け取る
+    ac.audioWorklet.addModule(URL.createObjectURL(new Blob([REC_WORKLET, GRAN_WORKLET], {type: 'text/javascript'}))).then(() => {
+      granNode = new AudioWorkletNode(ac, 'gran', {outputChannelCount: [2]});
+      master.disconnect(); master.connect(granNode).connect(comp);
+      recNode = new AudioWorkletNode(ac, 'rec', {channelCount: 2, channelCountMode: 'explicit'});
+      recNode.port.onmessage = e => e.data === 'done' ? saveRec() : recChunks.push(e.data);
+      comp.connect(recNode).connect(ac.destination); // 出力は無音。つないでおかないと動かないことがある
+    });
+  }
+  ac.resume();
+  mix();
+}
+function env(t, peak, dec, out) {
+  const g = ac.createGain();
+  g.gain.setValueAtTime(peak, t); g.gain.exponentialRampToValueAtTime(.001, t + dec);
+  g.connect(out); return g;
+}
+const hz = semi => 220 * 2 ** (semi / 12);
+// FM の1音：キャリアをモジュレーターで揺らす。比が整数でないと金属っぽくなる。drop で音程が落ちる
+function fm(t, f, ratio, index, dec, peak, out, drop = 1) {
+  const c = ac.createOscillator(), m = ac.createOscillator(), mg = ac.createGain();
+  c.frequency.setValueAtTime(f, t); m.frequency.setValueAtTime(f * ratio, t);
+  if (drop !== 1) { c.frequency.exponentialRampToValueAtTime(f * drop, t + dec); m.frequency.exponentialRampToValueAtTime(f * ratio * drop, t + dec); }
+  mg.gain.setValueAtTime(f * index, t); mg.gain.exponentialRampToValueAtTime(f * index * .02 + .01, t + dec);
+  m.connect(mg).connect(c.frequency);
+  c.connect(env(t, peak, dec, out)); c.start(t); m.start(t); c.stop(t + dec); m.stop(t + dec);
+}
+// ビットを落とす（16 段階に丸める）。ハット・スタブ・パーカッションはこれを通してデジタルに荒らす
+function crusher(out) {
+  const w = ac.createWaveShaper(), c = new Float32Array(1024);
+  for (let i = 0; i < 1024; i++) c[i] = Math.round((i / 511.5 - 1) * 8) / 8;
+  w.curve = c; w.connect(out); return w;
+}
+// 金属の響き：ごく短いディレイに強く返して、板や管が鳴っているような共鳴を足す（音の高さは delayTime）
+function comb(out) {
+  const d = ac.createDelay(.05), g = ac.createGain();
+  g.gain.value = .9; d.connect(g).connect(d); d.connect(out); return d;
+}
+function kickS(t) {
+  fm(t, 150, .5, 4, .16, .9, bus.kick, .3);
+  fm(t, 1100, 2.71, 4, .025, .25, bus.kick);                        // 頭に金属のカチッ
+  // キックでパッドを沈ませる（サイドチェイン風）
+  padBus.gain.setValueAtTime(.2, t); padBus.gain.linearRampToValueAtTime(1, t + .15);
+}
+function noiseS(t, type, freq, peak, dec, out) {
+  const s = ac.createBufferSource(), f = ac.createBiquadFilter();
+  s.buffer = noiseBuf; f.type = type; f.frequency.value = freq;
+  s.connect(f).connect(env(t, peak, dec, out)); s.start(t, Math.random() * .9); s.stop(t + dec);
+}
+// ハット：一瞬だけのクリック。高さと長さが毎回ちがう
+function clickS(t, x) {
+  const s = ac.createBufferSource(), f = ac.createBiquadFilter();
+  s.buffer = noiseBuf; s.playbackRate.value = .3 + x * 3;
+  f.type = 'bandpass'; f.frequency.value = 1500 + x * 11000; f.Q.value = 3;
+  const d = .004 + (1 - x) * .025;
+  s.connect(f).connect(env(t, .35, d, crush.hat)); s.start(t, x * .9); s.stop(t + d);
+  if (x > .55) fm(t, 2500 + x * 7000, 1.41, 5, .02 + x * .03, .1, crush.hat); // 半分くらいは金属のピン
+}
+// サブ：音程が落ちる短い FM のベース
+function subS(t, semi) { fm(t, hz(semi - 24), 1, 2, .14, .5, bus.sub, .4); }
+// パッド：金属っぽい和音を細かく刻む（フィルターはノブ 1・2）
+function padS(t, chord, len) {
+  for (const semi of chord.slice(0, 3)) {
+    fm(t, hz(semi - 12), 1.414, 3 + P.padRes * 8, len, .05, padFilter);
+    fm(t, hz(semi - 12) * 2.76, 3.17, 2 + P.padRes * 6, len * .7, .025, padFilter); // 整数倍でない倍音を重ねる
+  }
+}
+// スタブ：カーンと鳴る金属音
+function stabS(t, chord, x) {
+  const f = hz(chord[x * chord.length | 0] + 12), dec = .12 + x * .5;
+  fm(t, f, 3.53, 6 + P.padRes * 10, dec, .14, crush.stab);
+  fm(t, f * 2.76, 1.41, 4 + P.padRes * 8, dec * .6, .08, crush.stab);  // 2つ目の倍音も整数倍からずらす
+  combs.stab.delayTime.setValueAtTime(1 / (f * (x < .5 ? 1.5 : 2.3)), t);
+}
+function grindS(t, s, root, len) {
+  const {n, acc, slide} = grindPat[s], prevSlide = grindPat[(s + 15) % 16]?.slide;
+  const f = hz(n + root - 24), base = 80 * 2 ** (grindCut * 6); // カットオフは 80Hz〜5kHz を対数で
+  for (const o of grindOscs) prevSlide ? o.frequency.setTargetAtTime(f * o.r, t, .04) : o.frequency.setValueAtTime(f * o.r, t);
+  grindFilter.frequency.setValueAtTime(Math.min(base * (acc ? 6 : 3.5), 14000), t); // エンベロープの山もカットオフに合わせて上下
+  grindFilter.frequency.setTargetAtTime(base, t, acc ? .07 : .14);
+  grindGain.gain.setValueAtTime(acc ? .18 : .11, t);
+  if (!slide) grindGain.gain.setTargetAtTime(0, t + len * .6, .015);
+}
+// 音が鳴る時刻に映像も動かす（形と色の切り替えだけ。大きさや光は鳴っている音から測る）
+const at = (t, fn) => setTimeout(fn, Math.max(0, (t - ac.currentTime) * 1000));
+const HITS = {
+  kick: t => kickS(t),
+  snare: t => { combs.perc.delayTime.setValueAtTime(1 / (300 + Math.random() * 1500), t); noiseS(t, 'bandpass', 1800, .5, .12, crush.perc); fm(t, 300, 2.71, 6, .06, .3, crush.perc, .5); at(t, () => shape()); },
+  hat: t => clickS(t, Math.random()),
+  crash: t => { noiseS(t, 'highpass', 3000, .4, 1.2, crush.perc); at(t, () => shape()); },
+};
+function hit(name) { audio(); HITS[name](ac.currentTime); }
+function play(start) {
+  audio(); playing = start;
+  if (start) { step = 0; nextTime = ac.currentTime + .05; }
+  else grindGain.gain.setTargetAtTime(0, ac.currentTime, .02);
+}
+// 録音：REC（キーボードは W）で開始と停止。開始の瞬間に「カチッ」と画面の光を出し、録音ファイルの頭をそこに合わせる
+// （スマホで撮った映像の光ったコマに、録音ファイルの頭を置けば音と映像が合う）
+// グラニュラー：マスターの音を 2 秒ぶん貯めておき、そこから細かい粒を切り出して重ねる。
+// mix 1 で元の音が粒に置き換わる。size = 粒の長さ（秒）、rate = 再生速度（2 で 1 オクターブ上）。どれも時刻を指定して動かせる
+const GRAN_WORKLET = `registerProcessor('gran', class extends AudioWorkletProcessor {
+  static get parameterDescriptors() { return [{name: 'mix', defaultValue: 0}, {name: 'size', defaultValue: .05}, {name: 'rate', defaultValue: 1}, {name: 'smash', defaultValue: 0}]; }
+  constructor() { super(); this.hc = 0; this.hl = this.hr = 0; this.n = sampleRate * 2; this.buf = [new Float32Array(this.n), new Float32Array(this.n)]; this.w = 0; this.grains = []; this.next = 0; }
+  process([inp], [out], p) {
+    const L = inp[0] || new Float32Array(128), R = inp[1] || L, n = this.n, v = (a, i) => a.length > 1 ? a[i] : a[0];
+    for (let i = 0; i < 128; i++) {
+      const mix = v(p.mix, i);
+      this.buf[0][this.w] = L[i]; this.buf[1][this.w] = R[i];
+      if (mix > 0 && --this.next <= 0) {
+        const len = v(p.size, i) * sampleRate, r = v(p.rate, i) * (Math.random() < .15 ? -1 : 1); // ときどき逆回し
+        this.grains.push({pos: this.w - len * Math.max(r, 1) - Math.random() * sampleRate * .3 - 1, len, age: 0, r, pan: Math.random()});
+        this.next = len / 3;                                               // 3 粒くらいが重なる
+      }
+      let gl = 0, gr = 0;
+      for (const g of this.grains) {
+        if (g.age >= g.len) continue;
+        const e = Math.sin(Math.PI * g.age / g.len), j = ((Math.floor(g.pos) % n) + n) % n;
+        gl += this.buf[0][j] * e * (1 - g.pan * .7); gr += this.buf[1][j] * e * (.3 + g.pan * .7);
+        g.pos += g.r; g.age++;
+      }
+      let ol = L[i] * (1 - mix) + gl * mix * .8, or = R[i] * (1 - mix) + gr * mix * .8;
+      const sm = v(p.smash, i);
+      if (sm > 0) { // グシャ：強く歪ませ、サンプルを間引き、段の粗い音にする
+        const q = 4 + (1 - sm) * 20, d = 1 + sm * 10;
+        if (--this.hc <= 0) { this.hl = Math.round(Math.tanh(ol * d) * q) / q; this.hr = Math.round(Math.tanh(or * d) * q) / q; this.hc = 1 + sm * 16 | 0; }
+        ol = this.hl * .4; or = this.hr * .4;
+      }
+      out[0][i] = ol; out[1][i] = or;
+      this.w = (this.w + 1) % n;
+    }
+    this.grains = this.grains.filter(g => g.age < g.len);
+    return true;
+  }
+});`;
+const REC_WORKLET = `registerProcessor('rec', class extends AudioWorkletProcessor {
+  constructor() { super(); this.start = this.stop = Infinity; this.port.onmessage = e => Object.assign(this, e.data); }
+  process([input]) {
+    const f0 = currentFrame, n = 128;
+    if (f0 + n > this.start && f0 < this.stop) { // start〜stop のサンプルだけ切り出して送る
+      const a = Math.max(0, this.start - f0), b = Math.min(n, this.stop - f0);
+      const ch = input.length ? input : [new Float32Array(n), new Float32Array(n)];
+      this.port.postMessage([ch[0].slice(a, b), (ch[1] || ch[0]).slice(a, b)]);
+    }
+    if (f0 >= this.stop) { this.port.postMessage('done'); this.start = this.stop = Infinity; }
+    return true;
+  }
+});`;
+// ponytail: 録音は全部メモリに持つ（10 分で約 230MB）。長回しが要るならチャンクごとに書き出す
+let recNode, recChunks = [], recAt = 0;
+const COMP_DELAY = .006;
+function rec() {
+  audio();
+  if (!recNode) return;
+  const sr = ac.sampleRate;
+  if (!recAt) {
+    const t0 = ac.currentTime + .1;
+    recChunks = []; recAt = t0;
+    // コンプは先読みのぶん音を遅らせる（Chrome で 6ms = 48kHz で 288 サンプル、実測）。その分だけ後ろから録り始める
+    recNode.port.postMessage({start: Math.round((t0 + COMP_DELAY) * sr), stop: Infinity});
+    const o = ac.createOscillator(); o.frequency.value = 2000; // カチッ（マスターのミュートに関係なく鳴らす）
+    o.connect(env(t0, .8, .03, comp)); o.start(t0); o.stop(t0 + .03);
+    at(t0, () => flash = 1);
+  } else {
+    recNode.port.postMessage({stop: Math.round((ac.currentTime + COMP_DELAY) * sr)});
+    recAt = 0;
+  }
+}
+// 16bit ステレオの WAV にする
+function wav(chunks, sr) {
+  const len = chunks.reduce((s, c) => s + c[0].length, 0), v = new DataView(new ArrayBuffer(44 + len * 4));
+  const str = (o, s) => [...s].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
+  str(0, 'RIFF'); v.setUint32(4, 36 + len * 4, true); str(8, 'WAVE'); str(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 2, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * 4, true); v.setUint16(32, 4, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, len * 4, true);
+  let o = 44;
+  for (const [l, r] of chunks) for (let i = 0; i < l.length; i++) {
+    v.setInt16(o, Math.max(-1, Math.min(1, l[i])) * 32767, true);
+    v.setInt16(o + 2, Math.max(-1, Math.min(1, r[i])) * 32767, true);
+    o += 4;
+  }
+  return new Blob([v], {type: 'audio/wav'});
+}
+function saveRec() {
+  const d = new Date(), p2 = n => String(n).padStart(2, '0'), a = document.createElement('a');
+  a.href = URL.createObjectURL(wav(recChunks, ac.sampleRate));
+  a.download = `shatter_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}.wav`;
+  a.click();
+}
+
+// 粒にする：t から len 秒、粒の長さ size0 → size1、速さ rate0 → rate1
+function gran(t, len, size0, size1, rate0, rate1) {
+  if (!granNode) return;
+  const p = k => granNode.parameters.get(k);
+  p('mix').setValueAtTime(1, t); p('mix').setValueAtTime(0, t + len);
+  p('size').setValueAtTime(size0, t); p('size').linearRampToValueAtTime(size1, t + len);
+  p('rate').setValueAtTime(rate0, t); p('rate').linearRampToValueAtTime(rate1, t + len);
+  at(t, () => burst = 1);                                             // 映像もブロック崩れ
+}
+// グシャ：t から len 秒、全体を潰す（amt 0..1）
+function smash(t, len, amt) {
+  if (!granNode) return;
+  const p = granNode.parameters.get('smash');
+  p.setValueAtTime(amt, t); p.setValueAtTime(0, t + len);
+  at(t, () => { burst = 1; kick = 1; });                              // 映像：ブロック崩れと破片の飛び散り
+}
+// フィル：小節の最後の拍（4 小節目は最後の 2 拍）に入れる。k はフィルの中の進み具合 0..1
+const FILLS = {
+  roll: (t, k, len, ci) => { const r = 2 + Math.round(k * 6); for (let i = 0; i < r; i++) on('perc') && (i % 2 ? clickS(t + len * i / r, 1) : HITS.snare(t + len * i / r)); },
+  metal: (t, k, len, ci) => { for (let i = 0; i < 3; i++) on('stab') && stabS(t + len * i / 3, CHORDS[ci].map(x => x + Math.round(k * 12)), (k + i * .3) % 1); },
+  freeze: (t, k, len) => { if (k === 0) gran(t, len * 8, .09, .006, 1, 2.5); },  // 粒がどんどん細かく、高くなる
+  scatter: (t, k, len) => { if (k === 0) gran(t, len * 8, .03, .03, [.5, 1, 2][Math.random() * 3 | 0], [.5, 1, 2][Math.random() * 3 | 0]); },
+  smash: (t, k, len) => { if (k === 0) smash(t, len * 8, .4 + Math.random() * .4); FILLS.roll(t, k, len); },
+  cut: (t, k, len) => { if (k > .7) FILLS.roll(t, 1, len); },          // 全部止めて、最後だけ連打
+};
+let repeatFrom = -1, repeatLeft = 0, repeatLen = 4, fill = null;
+setInterval(() => {
+  while (playing && nextTime < ac.currentTime + .1) {
+    const ci = (step >> 5) % CHORDS.length, sixteenth = 60 / bpm / 4;
+    delay.delayTime.value = sixteenth * (Math.random() < .1 ? 1.5 : 3);
+    // 拍の頭で、ときどき直前の拍をもう一度鳴らす（その場で切り貼りしたような繰り返し）
+    // 2 ステップか 4 ステップの塊で、ときどき少し前を鳴らし直す（ブレイクを刻んで並べ替えたような繰り返し）
+    if (step % 2 === 0 && !repeatLeft && Math.random() < .12) { repeatLen = step % 4 === 0 && Math.random() < .5 ? 4 : 2; repeatFrom = (step - repeatLen * (1 + (Math.random() * 2 | 0)) + 64) % 16; repeatLeft = repeatLen; }
+    const s = repeatLeft ? (repeatFrom + repeatLen - repeatLeft--) % 16 : step % 16;
+    const b16 = step % 16, last = (step >> 4) % 4 === 3, from = last ? 8 : 12;
+    if (b16 === 0) fill = last || Math.random() < .5 ? Object.keys(FILLS)[Math.random() * 6 | 0] : null;
+    const inFill = fill && b16 >= from, k = inFill ? (b16 - from) / (16 - from) : 0;
+    if (inFill) FILLS[fill](nextTime, k, sixteenth, ci);
+    // フィルの外でも、ときどき一瞬グシャっと潰したり、短く粒にしたりする
+    else if (Math.random() < .04) smash(nextTime, sixteenth * (1 + Math.random() * 2), .3 + Math.random() * .4);
+    else if (Math.random() < .07) gran(nextTime, sixteenth * (1 + Math.random() * 3), .01 + Math.random() * .07, .01 + Math.random() * .07, [.5, 1, 1, 2][Math.random() * 4 | 0], 1);
+    if (inFill && fill === 'cut') { nextTime += sixteenth; step++; continue; }
+    // 4 小節ごとに、どれか1トラックのパターンを作り直す（少しずつ変わっていく）
+    if (step % 64 === 63) { newTrack(Object.keys(ROLL)[Math.random() * 6 | 0]); newBreak(); }
+    if (step % 32 === 0) at(nextTime, () => shape(ci / 4));
+    const dens = {...DENS, hat: .1 + P.hats * .9, stab: P.stabs * .8};
+    const fire = (k, fn) => { const e = pat[k][s]; if (!on(k) || e.th >= dens[k]) return;
+      for (let i = 0; i < e.r; i++) fn(nextTime + sixteenth * i / e.r, e, i); };
+    fire('kick', t => HITS.kick(t));
+    fire('hat', (t, e, i) => clickS(t, (e.x + i * .13) % 1));
+    fire('sub', (t, e) => subS(t, ROOTS[ci] + [0, 7, 12, -5][e.x * 4 | 0]));
+    fire('pad', (t, e) => padS(t, CHORDS[ci], sixteenth * (e.r > 1 ? .4 : .4 + e.x * 3)));
+    fire('stab', (t, e) => stabS(t, CHORDS[ci], e.x));
+    fire('perc', (t, e, i) => s === 4 || s === 12 || i % 2 === 0 ? HITS.snare(t) : clickS(t, 1));
+    if (grindPat[s] && on('grind')) grindS(nextTime, s, ROOTS[ci], sixteenth);
+    nextTime += sixteenth; step++;
+  }
+}, 25);
+
+// nanoKONTROL2（CC モードの出荷時設定）
+// ノブ 1〜6 = CC 16〜21 → KNOBS、ノブ 7・8 = CC 22・23 → ベースのカットオフ・レゾナンス
+// フェーダー 1〜8 = CC 0〜7 → TRACKS の音量、M ボタン = CC 48〜55 → ミュート
+// S ボタン = スネア、R ボタン = クラッシュ、▶ 再生、■ 停止、● 録音の開始・停止、CYCLE フレーズ作り直し、TRACK ◀▶ テンポ −2 / +2
+const downAt = {};
+let toggleMode = false;
+function cc(num, val) {
+  last = `cc ${num} = ${val}`;
+  const v = val / 127;
+  const now = performance.now();
+  // ボタン（CC 32 以上）で、押してから 0.3 秒以上たって 0 が来たらトグル設定とみなす
+  // ponytail: モーメンタリーで長押しした場合も誤ってトグル扱いになる（その後 M は押している間だけミュート）
+  if (num >= 32 && val === 0 && now - (downAt[num] ?? 0) >= 300) toggleMode = true;
+  if (val > 0) downAt[num] = now;
+  if (num >= 16 && num < 22) P[KNOBS[num - 16][0]] = v;
+  else if (num === 22) grindCut = v;
+  else if (num === 23) grindRes = v;
+  else if (num < 8) { vol[num] = v; mix(); }
+  // ボタンはモーメンタリー（押す 127 / 離す 0）でもトグル（押すたびに 127 と 0 が交互）でも1回押すごとに効かせる。
+  // 127 から 0.3 秒以内の 0 は「離した」とみなして無視、それより後の 0 はトグルの2回目の押下として扱う
+  else if (num >= 48 && num < 56 && toggleMode) { muted[num - 48] = val > 0; mix(); } // ランプが点いている = ミュート
+  else if (val === 0 && now - (downAt[num] ?? 0) < 300) return;
+  else if (num >= 48 && num < 56) { muted[num - 48] = !muted[num - 48]; mix(); }
+  else if (num >= 32 && num < 40) hit('snare');
+  else if (num >= 64 && num < 72) hit('crash');
+  else if (num === 41) play(true);
+  else if (num === 42) play(false);
+  else if (num === 45) rec();
+  else if (num === 46) newStabs();
+  else if (num === 60) style ^= 1;
+  else if (num === 58) bpm = Math.max(60, bpm - 2);
+  else if (num === 59) bpm = Math.min(180, bpm + 2);
+}
+
+if (embedded) midi = 'MIDI: サイトの中では使わない';
+else if (navigator.requestMIDIAccess) {
+  navigator.requestMIDIAccess().then(access => {
+    const bind = () => {
+      const names = [];
+      for (const input of access.inputs.values()) {
+        names.push(input.name);
+        input.onmidimessage = ({data: [st, d1, d2]}) => {
+          const type = st & 0xf0;
+          if (type === 0x90 && d2 > 0) noteOn(d1, d2);
+          else if (type === 0xb0) cc(d1, d2);
+        };
+      }
+      midi = 'MIDI: ' + (names.join(', ') || '入力なし');
+    };
+    bind();
+    access.onstatechange = bind;
+  }, () => midi = 'MIDI: 許可されていません');
+} else midi = 'MIDI: このブラウザは非対応（Chrome で開いてください）';
+
+// MIDI がなくても試せるように：Space で再生/停止、A/S/D でキック/スネア/クラッシュ、R でフレーズ作り直し、
+// 1〜8 でミュート、ドラッグで横 = パッドのフィルター / 縦 = ベースのカットオフ
+const KEYS = {a: 'kick', s: 'snare', d: 'crash'};
+document.getElementById('play').onclick = () => play(true);
+addEventListener('pointerdown', audio); // ブラウザは操作があるまで音を出さないので、最初にクリックしてもらう
+addEventListener('keydown', e => {
+  if (e.repeat) return;
+  const k = e.key.toLowerCase();
+  if (KEYS[k]) hit(KEYS[k]);
+  if (k === ' ' && !embedded) play(!playing);
+  if (k === 'r') newStabs();
+  if (k === 'w') rec();
+  if (k === 'v') style ^= 1;
+  if (k >= '1' && k <= '8') { muted[k - 1] = !muted[k - 1]; mix(); }
+  if (e.key === 'h') hud.hidden = !hud.hidden;
+  if (e.key === 'f') document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+});
+addEventListener('pointermove', e => {
+  if (!e.buttons) return;
+  P.padCut = e.clientX / innerWidth;
+  grindCut = 1 - e.clientY / innerHeight;
+});
+
+const COMMON = `
+precision highp float;
+uniform vec2 R; uniform float T, RT, K, B, H, PH, PR, PC, PQ, DF, RV, AC, AR, LH, LP, LS, SB, AL, DL, MS, FL;
+uniform sampler2D S, W;
+float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float n(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.-2.*f);
+  return mix(mix(h21(i), h21(i+vec2(1,0)), f.x), mix(h21(i+vec2(0,1)), h21(i+1.), f.x), f.y); }
+float fbm(vec2 p){ float v = 0., a = .5; for (int i = 0; i < 5; i++){ v += a*n(p); p = p*2.03 + 17.; a *= .5; } return v; }
+vec3 hsv(float h){ return clamp(abs(mod(h*6. + vec3(0,4,2), 6.) - 3.) - 1., 0., 1.); }
+vec3 hueRot(vec3 c, float a){ vec3 k = vec3(.57735); return c*cos(a) + cross(k, c)*sin(a) + k*dot(k, c)*(1. - cos(a)); }
+float smin(float a, float b, float k){ float h = clamp(.5 + .5*(b - a)/k, 0., 1.); return mix(b, a, h) - k*h*(1. - h); }
+
+// 塊：4つの円を溶かし合わせる（PH が変わると配置と大きさの組み合わせが変わる。K でふくらむ）
+float blob(vec2 p){
+  float d = 1e3;
+  for (int i = 0; i < 4; i++){
+    float fi = float(i);
+    float a = PH*1.7 + fi*1.5708 + T*.25*(1. + fi*.3);
+    vec2 c = vec2(cos(a), sin(a*1.3 + PH)) * .12;
+    float r = .13 * (.5 + .9*(.5 + .5*sin(PH*2.3 + fi*2.1))) + K*.07;
+    d = smin(d, length(p - c) - r, .1);
+  }
+  return d + (n(p*4. + T*.5) - .5)*.02;
+}
+vec3 blobCol(vec2 p, float d){
+  float h = sqrt(clamp(-d*7., 0., 1.)); // 中心ほど高い丸み
+  vec3 c = hsv(fract(p.x*1.1 - p.y*.8 + fbm(p*2.5 + T*.15)*.9 + H + h*.25));
+  return mix(c, vec3(1), pow(h, 5.)*.3 + K*.25);
+}
+// 背景の色（赤・橙・黄・黄緑・緑・水色・白）
+vec3 pal(int i){
+  if (i == 0) return vec3(1., .06, .06);
+  if (i == 1) return vec3(1., .45, .05);
+  if (i == 2) return vec3(1., .92, .12);
+  if (i == 3) return vec3(.72, 1., .12);
+  if (i == 4) return vec3(.15, .85, .3);
+  if (i == 5) return vec3(.25, .85, 1.);
+  return vec3(1.);
+}
+vec3 nearest(vec3 c){
+  vec3 best = pal(0); float bd = 1e3;
+  for (int i = 0; i < 7; i++){ vec3 q = pal(i); float d = dot(c - q, c - q); if (d < bd){ bd = d; best = q; } }
+  return best;
+}`;
+
+// 1パス目：前のフレームを流してずらし、少しずつ新しい色を混ぜる（フィードバック）
+const FEEDBACK = COMMON + `
+void main(){
+  vec2 uv = gl_FragCoord.xy / R;
+  vec2 p = (gl_FragCoord.xy - .5*R) / R.y;
+  float e = .02, f0 = fbm(p*1.5 + T*.05);
+  vec2 grad = vec2(fbm(p*1.5 + vec2(e, 0) + T*.05) - f0, fbm(p*1.5 + vec2(0, e) + T*.05) - f0) / e;
+  vec2 off = vec2(grad.y, -grad.x) * .0015;                       // ゆっくりした渦（音と関係なく動くのはこれだけ）
+  float row = h21(vec2(floor(gl_FragCoord.y/2.), floor(RT*6.)));
+  off.x += (row - .5) * .012 * LH;                                // ハット：横に引きずる
+  off -= (uv - .5) * (.012*K + .025*SB);                          // キックとサブ：外へ押し出す
+  vec3 prev = texture2D(S, uv + off).rgb;
+
+  vec2 q = vec2(fbm(p*2. + T*.1), fbm(p*2. + 5.2 - T*.1));
+  float v = fbm(p*2. + 3.*q + T*.05);
+  vec3 src = pal(int(floor(fract((v - .25)*1.6 + H*.5) * 6.)));
+  float rate = RT < .3 ? 1. : mix(.05, .003, RV);                // リバーブが深いほど残像が長い
+  vec3 c = mix(prev, src, rate);
+
+  float d = blob(p);
+  c = mix(c, blobCol(p, d), smoothstep(.01, -.01, d) * (.05 + .8*LS)); // スタブ：塊の跡を背景に残す
+  gl_FragColor = vec4(c, 1);
+}`;
+
+// 2パス目：背景を塗り分け、塊・ディレイの写し・ベースの波形・粒を重ねる
+const DISPLAY = COMMON + `
+vec3 bgAt(vec2 uv){ return nearest(texture2D(S, uv).rgb); }
+float wave(float x){ return (texture2D(W, vec2(x, .5)).r - .5) * 1.5; }
+float seg(vec2 p, vec2 a, vec2 b){ vec2 pa = p - a, ba = b - a; return length(pa - ba*clamp(dot(pa, ba)/dot(ba, ba), 0., 1.)); }
+void main(){
+  vec2 uv = gl_FragCoord.xy / R;
+  uv = (uv - .5) * (1. - .03*SB) + .5;                            // サブ：画面ごと寄る
+  float r = h21(vec2(floor(uv.y*50.), floor(RT*8.)));
+  uv.x += step(1. - B*.5, r) * (r - .5) * .2 * B;                  // スネア・クラッシュ：横帯ずれ
+  vec2 p = (uv*R - .5*R) / R.y;
+
+  float ca = .002 + .008*B + .015*AR*AL;                           // 色ずれ（ベースのレゾナンスでも）
+  vec3 sharp = vec3(bgAt(uv + vec2(ca, 0)).r, bgAt(uv).g, bgAt(uv - vec2(ca, 0)).b);
+  vec3 bg = mix(texture2D(S, uv).rgb, sharp, PC);                  // パッドのフィルター：閉じるとぼやけ、開くとくっきり
+  bg = clamp(hueRot(bg, PR*6.2832), 0., 1.);                        // コードチェンジで色が入れ替わる
+  bg = mix(vec3(dot(bg, vec3(.3, .59, .11))), bg, .35 + .65*LP);    // パッドが鳴っている分だけ色が乗る
+  bg *= .45 + .7*PC;                                                 // パッドのフィルター：明るさ
+  bg *= 1. - .3*LH + .3*LH*n(vec2(gl_FragCoord.x*.004, gl_FragCoord.y*.9 + floor(RT*12.))); // ハット：横線
+
+  float d = blob(p), px = 1.5 / R.y;
+  vec3 o = mix(bg, blobCol(p, d), smoothstep(px, -px, d));
+  o += exp(-abs(d)*(90. - 60.*PQ)) * PQ * (.3*LP + LS);             // レゾナンス：輪郭が鳴っている分だけ光る
+  float w = DL;                                                     // ディレイ：返りに合わせて輪郭の写しが外に並ぶ
+  for (int i = 1; i <= 5; i++){ o += vec3(.6, .9, 1.) * exp(-abs(d - float(i)*.05)*120.) * w; w *= DF; }
+
+  // ベース：波形をそのまま線で描く（カットオフで形と色、レゾナンスで光）
+  float x = gl_FragCoord.x / R.x, ex = 2. / R.x, sx = R.x / R.y;       // 隣の点と結んだ線分までの距離
+  vec2 a = vec2((x - ex - .5)*sx, wave(x - ex)), m = vec2((x - .5)*sx, wave(x)), b = vec2((x + ex - .5)*sx, wave(x + ex));
+  vec2 q = vec2((gl_FragCoord.x/R.x - .5)*sx, p.y);
+  float dist = min(seg(q, a, m), seg(q, m, b));
+  vec3 lc = mix(vec3(.25, .35, 1.), vec3(1., .95, .75), AC);
+  o += lc * AL * (smoothstep(3.*px, 0., dist) + exp(-dist*(60. - 40.*AR)) * (.3 + 1.2*AR));
+
+  o += (h21(gl_FragCoord.xy + fract(RT)*100.) - .5) * (.015 + .12*LH); // ハット：粒
+  o *= 1. - .25*dot(uv - .5, uv - .5);
+  o *= MS;
+  o = mix(o, vec3(1.), FL); // 録音開始の光
+  gl_FragColor = vec4(o, 1);
+}`;
+
+// 映像 2「破片」：黒地に青く光るローポリの岩と三角の破片（レイマーチングの立体）、緑に光る輪、ブロック崩れ（データモッシュ）
+const SHARD = COMMON + `
+vec3 h33(float i){ return fract(sin(vec3(i*12.9898, i*78.233, i*37.719)) * 43758.5453); }
+mat2 r2(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+float cz(){ return 2.6 - .8*SB; }                                    // サブ：カメラが寄る
+float yaw, pitch;
+// 真ん中の岩：平面で削ったローポリの塊（パッドで大きく、キックで縮んで破片が飛ぶ）
+float rock(vec3 q){
+  float d = -1e3;
+  for (int i = 0; i < 14; i++) d = max(d, dot(q, normalize(h33(float(i) + floor(PH + .5)*20. + 40.)*2. - 1.)));
+  return d - (.22 + .12*LP - .1*K);
+}
+// 破片：空間を升目に分け、升ごとに薄い三角の板を1枚
+float shard(vec3 q){
+  float s = .55 + .7*K + .25*LP, cs = .3;                             // キックで飛び散る、パッドで広がる
+  vec3 u = q / s, id = floor(u/cs + .5), lp = u - id*cs, h = h33(dot(id, vec3(1, 57, 113)) + 1.);
+  float r = length(id*cs);
+  if (r > 1.05 || r < .2 || h.x < .4) return cs*.45*s;               // 升が空なら次の升まで進む
+  lp.xy *= r2(h.y*6.28 + T*(h.z - .5)*8.);
+  lp.yz *= r2(h.z*6.28 + T*(h.y - .5)*8.);
+  vec2 sz = vec2(.07 + .09*h.y, .006);
+  float d = max(abs(lp.z) - sz.y, max(abs(lp.x)*.866 + lp.y*.5, -lp.y) - sz.x*.5);
+  return min(d, cs*.45) * s;
+}
+float ring(vec3 q){
+  float d = 1e3;
+  for (int i = 0; i < 3; i++){
+    float fi = float(i);
+    vec3 r = q; r.xy *= r2(fi*2.1 + T*(1. + .7*fi)); r.yz *= r2(fi*1.3 + T*1.6);
+    float a = atan(r.z, r.x), rad = .8 + .22*fi;
+    float tube = (.015 + .05*LS) * smoothstep(-.3, .2, sin(a*2. + fi*3. + T*4.)); // スタブで太る、ところどころ細く切れる
+    vec2 c = vec2(length(r.xz) - rad, r.y);
+    d = min(d, length(c) - tube);
+    float k = DL;                                                    // ディレイ：外側に細い写し
+    if (k > .02) for (int j = 1; j <= 2; j++){ d = min(d, length(c - vec2(.07*float(j), 0)) - .008*k); k *= DF; }
+  }
+  return d;
+}
+vec2 map(vec3 p){
+  vec3 q = p; q.xz *= r2(yaw); q.yz *= r2(pitch);
+  vec2 m = vec2(shard(q), 0);
+  float b = rock(q); if (b < m.x) m = vec2(b, 0);
+  b = ring(q); if (b < m.x) m = vec2(b, 1);
+  return m;
+}
+vec3 scene(vec2 p){
+  yaw = T*2. + PH*1.3; pitch = T*1.3 + PH*.7;
+  float px = 2.5 / R.y;
+  vec3 ro = vec3(0, 0, -cz()), rd = normalize(vec3(p, 1.6)), col = vec3(0);
+  float hs = sin(H*6.2832)*.5;                                       // コードチェンジで青と緑の間を行き来する
+  vec3 cyan = clamp(hueRot(vec3(.1, .6, 1.), hs), 0., 1.), green = clamp(hueRot(vec3(.2, 1., .45), hs), 0., 1.);
+  // 半径 1.6 の球の中だけ進める（外は何もないので飛ばす）
+  float bb = dot(ro, rd), cc = dot(ro, ro) - 2.56, hh = bb*bb - cc;
+  float t = -bb - sqrt(max(hh, 0.)), tEnd = hh < 0. ? -1. : -bb + sqrt(hh), steps = 0., g1 = 0., g2 = 0.; vec2 m;
+  for (int i = 0; i < 48; i++){
+    if (t > tEnd) break;
+    m = map(ro + rd*t);
+    float gl = exp(-m.x*30.);                                         // 近くを通った分だけ光がにじむ
+    if (m.y < .5) g1 += gl; else g2 += gl;
+    if (m.x < .001) break;
+    t += m.x; steps += 1.;
+  }
+  if (t < tEnd){
+    vec3 pos = ro + rd*t; vec2 e = vec2(.002, -.002);
+    vec3 nr = normalize(e.xyy*map(pos + e.xyy).x + e.yyx*map(pos + e.yyx).x + e.yxy*map(pos + e.yxy).x + e.xxx*map(pos + e.xxx).x);
+    vec3 L = normalize(vec3(.6, .8, -.5));
+    float ao = 1. - steps/48.;
+    if (m.y < .5){                                                   // 破片と岩：面ごとに明るさが違う灰色（パッドのレゾナンスで明暗が強く）
+      float l = abs(dot(nr, L));
+      col = cyan * (.01 + (.4 + 1.*LP)*l*l*l) * ao;                   // 面：向きで明暗がはっきり分かれる（パッドが鳴ると明るく）
+      col += cyan * pow(1. - abs(dot(nr, rd)), 3.) * (.4 + 1.2*PQ);   // ふちが光る（パッドのレゾナンス）
+    } else {                                                         // 輪：黒くてつやがある
+      col = green * (.6 + .8*LS) + pow(max(dot(reflect(rd, nr), L), 0.), 40.);  // 輪：緑に光る（スタブで強く）
+    }
+    col *= 1. - smoothstep(2.6, 5., t);                               // 奥は闇に沈む
+  }
+  col += cyan * g1 * (.006 + .02*PQ) + green * g2 * (.02 + .04*LS);
+  // 細い直線（赤と黒）。ハットに合わせて点く
+  for (int i = 0; i < 10; i++){
+    float fi = float(i), th = h21(vec2(fi, 3.))*6.2832 + T*.4, o = (h21(vec2(fi, 9.)) - .5)*.8;
+    float on = step(h21(vec2(fi, floor(RT*8.))), LH*1.3);
+    float dl = abs(dot(p, vec2(cos(th), sin(th))) - o);
+    col += (fi < 3. ? green : cyan) * on * (smoothstep(px*1.5, 0., dl) + .3*exp(-dl*120.));
+  }
+  return col;
+}
+void main(){
+  vec2 uv = gl_FragCoord.xy / R;
+  vec2 p = (gl_FragCoord.xy - .5*R) / R.y;
+  // データモッシュ：ブロックごとに、新しい絵を描かず前のコマをずらして使い回す
+  float tick = floor(RT*12.), bs = h21(vec2(tick, 1.)) < .5 ? 8. : 24.; // ブロックの大きさはコマごとに変わる
+  vec2 blk = floor(gl_FragCoord.xy / bs);
+  float hb = h21(blk*.37 + tick);
+  float mosh = step(1. - .9*B - .25*AL*AR, hb);                      // スネア・クラッシュと、ベースのレゾナンス
+  vec2 mv = (vec2(h21(blk + 3. + tick), h21(blk + 9.)) - .5) * vec2(.06, .01);
+  vec3 prev = texture2D(S, uv).rgb;
+  vec3 moshed = hueRot(texture2D(S, h21(blk + 5.) < .5 ? (blk + .5)*bs/R + mv : uv + mv).rgb, .15);
+  moshed = mix(vec3(dot(moshed, vec3(.33))), moshed, 1.4);           // ずれるたびに色が濃くなる
+  float rate = RT < .3 ? 1. : mix(1., .3, RV*RV);                    // リバーブが深いほど残像が長い
+  vec3 c = mix(prev, scene(p), rate);
+  gl_FragColor = vec4(clamp(mix(c, moshed, mosh), 0., 1.), 1);
+}`;
+
+const SHARD_DISPLAY = COMMON + `
+float wave(float x){ return (texture2D(W, vec2(x, .5)).r - .5) * 1.5; }
+float seg(vec2 p, vec2 a, vec2 b){ vec2 pa = p - a, ba = b - a; return length(pa - ba*clamp(dot(pa, ba)/dot(ba, ba), 0., 1.)); }
+float b2(vec2 a){ a = floor(a); return fract(dot(a, vec2(.5, a.y*.75))); }
+float bayer(vec2 a){ return b2(.5*a)*.25 + b2(a); }                    // 4x4 の網点（ディザ）
+void main(){
+  vec2 uv = gl_FragCoord.xy / R;
+  float r = h21(vec2(floor(uv.y*40.), floor(RT*10.)));
+  uv.x += step(1. - B*.6, r) * (r - .5) * .25 * B;                   // スネア・クラッシュ：横帯ずれ
+  vec2 p = (uv*R - .5*R) / R.y;
+  float ca = .002 + .012*B + .006*AR*AL;                              // 色ずれは黄と青に分かれる
+  vec3 a = texture2D(S, uv + vec2(ca, 0)).rgb, b = texture2D(S, uv - vec2(ca, 0)).rgb;
+  vec3 o = vec3(a.r, a.g, b.b);
+  o = mix(vec3(dot(o, vec3(.3, .59, .11))), o, .3 + .7*LP);          // パッドが鳴っている分だけ色が乗る
+  o *= .5 + PC;                                                      // パッドのフィルター：明るさ
+  o = clamp((o - .06) * 1.9, 0., 1.);                                // 黒を締めて光を強く（コントラスト）
+  o = max(mix(vec3(dot(o, vec3(.3, .59, .11))), o, 1.6), 0.);        // 色を濃く
+  // ベース：光る波形の線
+  float px = 1.5 / R.y, x = gl_FragCoord.x / R.x, ex = 2. / R.x, sx = R.x / R.y;
+  vec2 A = vec2((x - ex - .5)*sx, wave(x - ex)), m = vec2((x - .5)*sx, wave(x)), B2 = vec2((x + ex - .5)*sx, wave(x + ex));
+  float dist = min(seg(vec2((x - .5)*sx, p.y), A, m), seg(vec2((x - .5)*sx, p.y), m, B2));
+  vec3 lc = mix(vec3(.1, .9, .4), vec3(.7, 1., 1.), AC);
+  o = mix(o, lc, AL * min(1., smoothstep(2.*px, 0., dist) + exp(-dist*(80. - 50.*AR)) * AR));
+  o += (h21(gl_FragCoord.xy + fract(RT)*100.) - .5) * (.03 + .15*LH); // ハット：粒
+  // 昔のコンピューターの色数：RGB 各 3 段階（27 色）に減らし、網点で中間色を出す。サブで網点が粗くなる
+  float lv = 2.;
+  o = floor(clamp(o, 0., 1.)*lv + bayer(floor(gl_FragCoord.xy / (2. + 2.*floor(SB*2.)))) ) / lv;
+  o *= MS;
+  o = mix(o, vec3(1.), FL);
+  gl_FragColor = vec4(o, 1);
+}`;
+
+const c = document.getElementById('c'), hud = document.getElementById('hud');
+const gl = c.getContext('webgl');
+const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s); return s; };
+const vs = sh(gl.VERTEX_SHADER, 'attribute vec2 a;void main(){gl_Position=vec4(a,0,1);}');
+const UNIFORMS = ['R', 'T', 'RT', 'K', 'B', 'H', 'PH', 'PR', 'PC', 'PQ', 'DF', 'RV', 'AC', 'AR', 'LH', 'LP', 'LS', 'SB', 'AL', 'DL', 'MS', 'FL', 'S', 'W'];
+const program = src => {
+  const pr = gl.createProgram();
+  gl.attachShader(pr, vs); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, src));
+  gl.bindAttribLocation(pr, 0, 'a'); gl.linkProgram(pr);
+  const u = {}; for (const k of UNIFORMS) u[k] = gl.getUniformLocation(pr, k);
+  return {pr, u};
+};
+const STYLES = [[program(FEEDBACK), program(DISPLAY)], [program(SHARD), program(SHARD_DISPLAY)]];
+let style = 1;
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+function texture() {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+// ベースの波形はテクスチャ 1 に置く
+gl.activeTexture(gl.TEXTURE1);
+texture();
+gl.activeTexture(gl.TEXTURE0);
+
+// フィードバック用の2枚（半分の解像度）を交互に使う
+let bufs = [], sw = 0, shh = 0;
+function makeBufs(w, h) {
+  bufs = [0, 1].map(() => {
+    const tex = texture();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    return {tex, f};
+  });
+  sw = w; shh = h; t = rt = 0; // 作り直したら最初の色で埋め直す
+}
+
+function draw({pr, u}, w, h, src) {
+  gl.useProgram(pr);
+  gl.viewport(0, 0, w, h);
+  gl.uniform2f(u.R, w, h);
+  gl.uniform1f(u.T, t); gl.uniform1f(u.RT, rt);
+  gl.uniform1f(u.K, Math.max(kick, L.kick)); gl.uniform1f(u.B, Math.max(burst, L.perc));
+  gl.uniform1f(u.H, hueJump); gl.uniform1f(u.PH, phase); gl.uniform1f(u.PR, hueJump * .5);
+  gl.uniform1f(u.PC, P.padCut); gl.uniform1f(u.PQ, P.padRes); gl.uniform1f(u.DF, P.delayFb); gl.uniform1f(u.RV, P.reverb);
+  gl.uniform1f(u.AC, grindCut); gl.uniform1f(u.AR, grindRes);
+  gl.uniform1f(u.LH, L.hat); gl.uniform1f(u.LP, L.pad); gl.uniform1f(u.LS, L.stab); gl.uniform1f(u.SB, L.sub);
+  gl.uniform1f(u.AL, L.grind); gl.uniform1f(u.DL, L.dly); gl.uniform1f(u.MS, ms); gl.uniform1f(u.FL, flash);
+  gl.uniform1i(u.S, 0); gl.uniform1i(u.W, 1);
+  gl.bindTexture(gl.TEXTURE_2D, src);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+let prev = performance.now();
+function frame(now) {
+  const dt = Math.min((now - prev) / 1000, .1); prev = now;
+  t += dt * .15; rt += dt;
+  kick *= Math.exp(-dt * 8);
+  burst *= Math.exp(-dt * 6);
+  ms += ((muted[7] ? 0 : 1) - ms) * (1 - Math.exp(-dt * 5));
+  phase += (phaseTo - phase) * (1 - Math.exp(-dt * 4));
+  if (ac) {
+    const at = ac.currentTime;
+    padFilter.frequency.setTargetAtTime(150 + P.padCut ** 2 * 5000, at, .05);
+    padFilter.Q.setTargetAtTime(1 + P.padRes * 14, at, .05);
+    fbk.gain.setTargetAtTime(.15 + P.delayFb * .75, at, .05);
+    verb.gain.setTargetAtTime(.2 + P.reverb * 1.5, at, .05);
+    grindFilter.Q.setTargetAtTime(1 + grindRes * 22, at, .05);
+    measure(dt);
+    // ベースの波形：上がりで 0 を横切るところから 1024 サンプル（オシロスコープのトリガー）
+    let s0 = 0;
+    for (let i = 1; i < 1024; i++) if (wave[i - 1] < 128 && wave[i] >= 128) { s0 = i; break; }
+    gl.activeTexture(gl.TEXTURE1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, 1024, 1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, wave.subarray(s0, s0 + 1024));
+    gl.activeTexture(gl.TEXTURE0);
+  }
+  const dpr = Math.min(devicePixelRatio, 2);
+  const w = innerWidth * dpr | 0, h = innerHeight * dpr | 0;
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  // 映像 2 は立体を計算するので重い。フィードバックを横 900 px くらいまで落として描く（粗さは網点で目立たない）
+  const div = style ? Math.max(2, Math.round(w / 900)) : 2;
+  if (sw !== (w / div | 0) || shh !== (h / div | 0)) makeBufs(w / div | 0, h / div | 0);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bufs[1].f);
+  draw(STYLES[style][0], sw, shh, bufs[0].tex);
+  bufs.reverse();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  draw(STYLES[style][1], w, h, bufs[0].tex);
+  flash *= .5; // 光った最初のコマは真っ白、そのあとすぐ消える
+
+  if (!hud.hidden) hud.textContent = [midi, 'last: ' + last,
+    ac?.state === 'running' ? `音: ${playing ? '再生中' : '停止'}  bpm ${bpm}  ${recAt ? `● 録音中 ${Math.max(0, ac.currentTime - recAt).toFixed(1)}s` : '●/W 録音'}` : '音: 画面を一度クリックすると鳴ります',
+    ...KNOBS.map(([k, snd, vis], i) => `ノブ ${i + 1}  ${P[k].toFixed(2)}  ${snd} ↔ ${vis}`),
+    `ノブ 7  ${grindCut.toFixed(2)}  ベースのカットオフ ↔ 波形の線の形と色`,
+    `ノブ 8  ${grindRes.toFixed(2)}  ベースのレゾナンス ↔ 線の光と色ずれ`,
+    'フェーダー/M  ' + TRACKS.map((k, i) => `${i + 1} ${k} ${muted[i] ? 'MUTE' : vol[i].toFixed(2)}`).join('  '),
+    `映像 ${style + 1}/2（SET / V で切り替え）は鳴っている音の大きさで動く（ミュート・音量もそのまま出る）`,
+    ...(style ? ['  キック=破片が飛び散る  サブ=カメラが寄る  ハット=光る直線・粒  パッド=色の濃さ  スタブ=緑の輪が太く明るく',
+      '  ディレイ=輪の写し  ベース=光る波形の線  スネア/クラッシュ・ベースのレゾナンス=ブロック崩れ  コードチェンジ=回転']
+    : ['  キック=塊の膨らみ  サブ=画面の寄り  ハット=粒と横線  パッド=背景の色  スタブ=塊の跡',
+      '  ディレイ=輪郭の写し  ベース=波形の線  スネア/クラッシュ=横帯ずれ  コードチェンジ=色と形']),
+    '▶/Space 再生  ■ 停止  S スネア  R クラッシュ  CYCLE/R フレーズ作り直し  TRACK◀▶ テンポ',
+    'A/S/D キック/スネア/クラッシュ  1〜8 ミュート  H 表示切替  F 全画面'].join('\n');
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body></html>
