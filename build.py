@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""hitori_av の日別フォルダから lab/ と index.html を作る。
+"""hitori_av の作品フォルダ（NNN_名前）から lab/ と index.html を作る。
 
 使い方: python3 build.py [../hitori_av]
 - lab/<名前>/piece.html  … 作品の HTML をそのままコピー（自己完結しているので書き換えない）
@@ -117,7 +117,7 @@ def tools():
 
 
 def main():
-    dirs = sorted(d for d in SRC.iterdir() if d.is_dir() and re.match(r"\d{4}-\d{2}-\d{2}_", d.name))  # 並び順にだけ日付を使う
+    dirs = sorted(d for d in SRC.iterdir() if d.is_dir() and re.match(r"\d{3}_", d.name))  # 通し番号（NNN_名前）の順
     for old in LAB.glob("*") if LAB.exists() else []:
         if old.name not in {d.name.split("_", 1)[1] for d in dirs}:
             shutil.rmtree(old)  # 名前を変えた・フォルダを消した場合の残骸
