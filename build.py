@@ -10,6 +10,7 @@
 - index.html                  … template.html の {{ITEMS}} を埋める
 - music/index.html            … music.tsv（曲名\tURL、上から並ぶ）から同じ template.html で作る
   YouTube の URL はサムネイル→押すと再生、それ以外（Bandcamp の EmbeddedPlayer の URL など）はそのまま iframe で埋める
+- tools/index.html            … tools.tsv（名前\t英文\t遊べる URL\tGitHub の URL）から作る。画像は tools/<名前>.jpg を手で置く
 """
 import html, re, shutil, subprocess, sys
 from pathlib import Path
@@ -100,6 +101,20 @@ def music():
     (OUT / "music" / "index.html").write_text(page)
 
 
+def tool(name, desc, play, repo):
+    return (f'<div class="tile"><a href="{html.escape(play)}"><img src="{html.escape(name)}.jpg" alt="" loading="lazy"></a>'
+            f'<span class="cap"><i>{html.escape(name)}</i><em>{html.escape(desc)}</em>'
+            f'<em><a href="{html.escape(play)}">play</a> / <a href="{html.escape(repo)}">GitHub</a></em></span></div>')
+
+
+def tools():
+    rows = [l.split("\t") for l in (OUT / "tools.tsv").read_text().splitlines() if l.count("\t") == 3]
+    page = (OUT / "template.html").read_text()
+    for k, v in {"ITEMS": "\n".join(tool(*r) for r in rows), "SUB": "made in the browser, open source", "ROOT": "../"}.items():
+        page = page.replace("{{%s}}" % k, v)
+    (OUT / "tools" / "index.html").write_text(page)
+
+
 def main():
     dirs = sorted(d for d in SRC.iterdir() if d.is_dir() and re.match(r"\d{4}-\d{2}-\d{2}_", d.name))  # 並び順にだけ日付を使う
     for old in LAB.glob("*") if LAB.exists() else []:
@@ -115,6 +130,7 @@ def main():
     page = page.replace("{{SUB}}", f"{len(items)} pieces · click to play live").replace("{{ROOT}}", "./")
     (OUT / "index.html").write_text(page)
     music()
+    tools()
     print(f"{len(items)} items -> index.html")
 
 

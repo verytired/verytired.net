@@ -31,6 +31,8 @@
   .cap b { color: var(--accent); font-weight: normal; }
   .cap i { font-style: normal; }
   .cap em { display: block; font-style: normal; color: var(--dim); }
+  .cap em a { color: var(--accent); }
+  .cap em a:hover { text-decoration: underline; }
   .tile:hover .cap b { background: var(--accent); color: var(--bg); }
   footer { padding: 48px 16px 32px; color: var(--dim); }
   footer p { margin: 0 0 4px; }
@@ -45,7 +47,7 @@
 <pre id="field" aria-hidden="true"></pre>
 <header>
   <h1><a href="{{ROOT}}">verytired.net</a></h1>
-  <nav><a href="{{ROOT}}">audiovisual</a> / <a href="{{ROOT}}music/">music</a></nav>
+  <nav><a href="{{ROOT}}">audiovisual</a> / <a href="{{ROOT}}music/">music</a> / <a href="{{ROOT}}tools/">tools</a></nav>
   <span>{{SUB}}</span>
 </header>
 <main>
