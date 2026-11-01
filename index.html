@@ -117,7 +117,7 @@ requestAnimationFrame(draw);
 if (!still && matchMedia('(hover: hover)').matches) document.querySelectorAll('.tile').forEach(t => {
   t.addEventListener('pointermove', e => {
     const r = t.getBoundingClientRect(), x = (e.clientX - r.left) / r.width - .5, y = (e.clientY - r.top) / r.height - .5;
-    t.style.transform = `perspective(700px) rotateX(${-y * 14}deg) rotateY(${x * 14}deg)`;
+    t.style.transform = `perspective(500px) rotateX(${-y * 30}deg) rotateY(${x * 30}deg)`;
   });
   t.addEventListener('pointerleave', () => t.style.transform = '');
 });
