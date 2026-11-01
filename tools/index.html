@@ -121,9 +121,10 @@ if (!still && matchMedia('(hover: hover)').matches) document.querySelectorAll('.
   t.addEventListener('pointerleave', () => t.style.transform = '');
 });
 
-// トップは1画面目を過ぎたらヘッダーを出す
+// トップは最新作（#latest）が画面の上まで来たらヘッダーを出す
 if (document.querySelector('.intro')) {
-  const h = document.querySelector('header'), f = () => h.classList.toggle('away', scrollY < innerHeight * .6);
+  const h = document.querySelector('header'), l = document.getElementById('latest');
+  const f = () => h.classList.toggle('away', l.getBoundingClientRect().top > h.offsetHeight);
   addEventListener('scroll', f, { passive: true }); f();
 }
 
