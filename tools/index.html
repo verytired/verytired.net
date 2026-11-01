@@ -26,7 +26,8 @@
   header nav a:hover, header h1 a:hover { color: var(--fg); }
   /* 1画面目: 最新作を大きく1つ。まわりは背景の縞が見える余白 */
   .hero { min-height: calc(100svh - 48px); display: grid; place-items: center; padding: 32px 16px; }
-  .hero .tile { width: min(64vmin, 520px); }
+  .hero .tile { width: min(80vw, 64vh, 520px); }
+  .hero .cap em { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }  /* 説明は2行まで */
   main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .tile { display: block; background: var(--bg); transition: transform .15s ease-out; }
   .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
