@@ -97,7 +97,7 @@ def track(title, url):
 def music():
     rows = [l.split("\t", 1) for l in (OUT / "music.tsv").read_text().splitlines() if "\t" in l]
     page = (OUT / "template.html").read_text()
-    for k, v in {"ITEMS": "\n".join(track(t, u.strip()) for t, u in rows), "SUB": f"{len(rows)} tracks", "ROOT": "../"}.items():
+    for k, v in {"ITEMS": "\n".join(track(t, u.strip()) for t, u in rows), "SUB": f"{len(rows)} tracks", "ROOT": "../", "HERO": ""}.items():
         page = page.replace("{{%s}}" % k, v)
     (OUT / "music").mkdir(exist_ok=True)
     (OUT / "music" / "index.html").write_text(page)
@@ -113,7 +113,7 @@ def tool(name, desc, play, repo, video=""):
 def tools():
     rows = [l.split("\t") for l in (OUT / "tools.tsv").read_text().splitlines() if l.count("\t") in (3, 4)]
     page = (OUT / "template.html").read_text()
-    for k, v in {"ITEMS": "\n".join(tool(*r) for r in rows), "SUB": "made in the browser, open source", "ROOT": "../"}.items():
+    for k, v in {"ITEMS": "\n".join(tool(*r) for r in rows), "SUB": "made in the browser, open source", "ROOT": "../", "HERO": ""}.items():
         page = page.replace("{{%s}}" % k, v)
     (OUT / "tools" / "index.html").write_text(page)
 
@@ -129,6 +129,7 @@ def main():
         if i["live"]:
             player(i, n)
     page = (OUT / "template.html").read_text()
+    page = page.replace("{{HERO}}", f'<section class="hero">{tile(*numbered[0][::-1])}</section>')  # 最新作を1画面目に大きく
     page = page.replace("{{ITEMS}}", "\n".join(tile(i, n) for n, i in numbered))
     page = page.replace("{{SUB}}", f"{len(items)} pieces · click to play live").replace("{{ROOT}}", "./")
     (OUT / "index.html").write_text(page)

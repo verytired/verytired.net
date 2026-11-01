@@ -24,6 +24,9 @@
   header span { margin-left: auto; }
   header nav { color: var(--dim); }
   header nav a:hover, header h1 a:hover { color: var(--fg); }
+  /* 1画面目: 最新作を大きく1つ。まわりは背景の縞が見える余白 */
+  .hero { min-height: calc(100svh - 48px); display: grid; place-items: center; padding: 32px 16px; }
+  .hero .tile { width: min(64vmin, 520px); }
   main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .tile { display: block; background: var(--bg); transition: transform .15s ease-out; }
   .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
@@ -51,6 +54,7 @@
   <nav><a href="./">audiovisual</a> / <a href="./music/">music</a> / <a href="./tools/">tools</a></nav>
   <span>19 pieces · click to play live</span>
 </header>
+<section class="hero"><a class="tile" href="lab/raster/"><video src="lab/raster/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#019</b> <i>raster</i><em>A black-and-white face photo cut into horizontal strips, each scaled a little differently so its outline repeats in sawtooth steps, and split into vertical bands rendered in different halftones (coarse round dots, a reaction-diffusion maze, fine dots, the photo itself, binary blocks and fine diamonds), the extra zoom swelling and receding in a wave every bar to a 15-second loop of minimal glitch techno at 128 BPM, with the kick pushing the wave out and the claps reshuffling the bands, in the spirit of toan_vu_huu&#x27;s image slicer app, all synthesized live in the browser.</em></span></a></section>
 <main>
 <a class="tile" href="lab/raster/"><video src="lab/raster/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#019</b> <i>raster</i><em>A black-and-white face photo cut into horizontal strips, each scaled a little differently so its outline repeats in sawtooth steps, and split into vertical bands rendered in different halftones (coarse round dots, a reaction-diffusion maze, fine dots, the photo itself, binary blocks and fine diamonds), the extra zoom swelling and receding in a wave every bar to a 15-second loop of minimal glitch techno at 128 BPM, with the kick pushing the wave out and the claps reshuffling the bands, in the spirit of toan_vu_huu&#x27;s image slicer app, all synthesized live in the browser.</em></span></a>
 <a class="tile" href="lab/fold/"><video src="lab/fold/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#018</b> <i>fold</i><em>Four scenes of a city &quot;incident&quot; made with Veo and shot like 1996 camcorder footage, an underground ceiling caving in, an arcade crowd fleeing toward the camera, a building splitting and lifting into the sky, a lone figure in a rainy alley, cut together at 128 BPM with real datamosh (I-frames removed) smearing each scene into the next, time-displacement rings on every kick, slit-scan bands on the claps and a vortex on the closing snare roll, in the spirit of metr0punk&#x27;s analog-horror reels, all synthesized live in the browser.</em></span></a>
