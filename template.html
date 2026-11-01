@@ -27,6 +27,8 @@
   /* 1画面目: 最新作を大きく1つ。まわりは背景の縞が見える余白 */
   /* トップ: 1画面目は背景の縞が主役で、左上に自己紹介。スクロールすると最新作を日付付きで大きく */
   body:has(.intro) #field { opacity: .6; }
+  header { transition: transform .3s; }
+  header.away { transform: translateY(-100%); }  /* トップの1画面目ではヘッダーを隠す */
   .intro { min-height: calc(100svh - 48px); padding: 12vh 16px 32px; display: flex; flex-direction: column; font-size: clamp(15px, 2vw, 20px); text-shadow: 0 0 6px var(--bg), 0 0 12px var(--bg); }
   .intro p { margin: 0 0 6px; max-width: 32em; }
   .intro b { font-weight: normal; color: var(--accent); }
@@ -118,6 +120,12 @@ if (!still && matchMedia('(hover: hover)').matches) document.querySelectorAll('.
   });
   t.addEventListener('pointerleave', () => t.style.transform = '');
 });
+
+// トップは1画面目を過ぎたらヘッダーを出す
+if (document.querySelector('.intro')) {
+  const h = document.querySelector('header'), f = () => h.classList.toggle('away', scrollY < innerHeight * .6);
+  addEventListener('scroll', f, { passive: true }); f();
+}
 
 // 見えている動画だけ再生する
 const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? e.target.play().catch(() => {}) : e.target.pause()));
