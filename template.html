@@ -17,7 +17,8 @@
   @keyframes psy { to { background-position: 300% 300%; } }
   @media (prefers-reduced-motion: reduce) { #field { animation: none; } }
   #field { position: fixed; inset: 0; margin: 0; opacity: .28; overflow: hidden; pointer-events: none; z-index: -1; line-height: 1; }
-  header { padding: 24px 16px 8px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  header { position: sticky; top: 0; z-index: 1; background: rgb(18 18 20 / .7); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+           padding: 12px 16px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   header h1 { font-size: 13px; margin: 0; font-weight: normal; color: var(--accent); }
   header span { color: var(--dim); }
   header span { margin-left: auto; }
