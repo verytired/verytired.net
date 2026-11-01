@@ -24,7 +24,7 @@
   header nav { color: var(--dim); }
   header nav a:hover, header h1 a:hover { color: var(--fg); }
   main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
-  .tile { display: block; background: var(--bg); }
+  .tile { display: block; background: var(--bg); transition: transform .15s ease-out; }
   .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
   .tile:hover video, .tile:hover img { transform: scale(1.015); }
   .cap { display: block; padding: 6px 0; }
@@ -80,14 +80,14 @@
 // 背景: 文字で描く干渉縞（ertdfgcvb 風）。カーソルのまわりが渦を巻き、押すと波紋が広がり、スクロールで縞が流れる。動きを減らす設定なら止める
 const pre = document.getElementById('field'), chars = ' .·:-=+*#%@';
 const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
-let cols, rows, mx = -1e3, my = -1e3, ripples = [];
+let cols, rows, mx = -1e3, my = -1e3, ripples = [], flash = 0;
 // 1文字の幅は実測する（フォントで変わる。決め打ちだと右端まで届かずカーソルともずれる）
 pre.textContent = '@'.repeat(100); const range = document.createRange(); range.selectNodeContents(pre);
 const cw = range.getBoundingClientRect().width / 100 || 7.8, ch = 13;
 const resize = () => { cols = Math.ceil(innerWidth / cw); rows = Math.ceil(innerHeight / ch); };
 addEventListener('resize', resize); resize();
 addEventListener('pointermove', e => { mx = e.clientX / cw; my = e.clientY / ch; });
-addEventListener('pointerdown', e => { ripples.push({ x: e.clientX / cw, y: e.clientY / ch, t: performance.now() }); ripples = ripples.slice(-6); });
+addEventListener('pointerdown', e => { ripples.push({ x: e.clientX / cw, y: e.clientY / ch, t: performance.now() }); ripples = ripples.slice(-6); flash = .5; });
 const draw = t => {
   const sy = scrollY * .01;
   ripples = ripples.filter(r => t - r.t < 2500);
@@ -106,9 +106,21 @@ const draw = t => {
     s += '\n';
   }
   pre.textContent = s;
+  flash *= .95;
+  pre.style.opacity = .28 + flash;  // 押した直後は明るく光る
+  pre.style.filter = `hue-rotate(${scrollY * .3}deg)`;  // スクロールで色が回る
   if (!still) requestAnimationFrame(draw);
 };
 requestAnimationFrame(draw);
+
+// タイルがカーソルの方へ傾く（マウスのときだけ）
+if (!still && matchMedia('(hover: hover)').matches) document.querySelectorAll('.tile').forEach(t => {
+  t.addEventListener('pointermove', e => {
+    const r = t.getBoundingClientRect(), x = (e.clientX - r.left) / r.width - .5, y = (e.clientY - r.top) / r.height - .5;
+    t.style.transform = `perspective(700px) rotateX(${-y * 14}deg) rotateY(${x * 14}deg)`;
+  });
+  t.addEventListener('pointerleave', () => t.style.transform = '');
+});
 
 // 見えている動画だけ再生する
 const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? e.target.play().catch(() => {}) : e.target.pause()));
