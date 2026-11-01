@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Raster</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #fff; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="15"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+
+<script>
+// 白黒の顔を水平の短冊に切り、短冊ごとに拡大率をずらす（輪郭が鋸の歯になって何段も繰り返す）。
+// 拡大の上乗せが波になって1小節ごとに往復し、縦の帯ごとに網点の種類（粗い点・反応拡散の迷路・細かい点・写真・二値）が違う。
+// 128 BPM の15秒ループ（32拍）のミニマルなグリッチテクノ：キックで波が膨らみ、クラップで帯の割り付けが入れ替わる
+const BPM = 128, BEAT = 60 / BPM, BAR = 4 * BEAT, LOOP = 32 * BEAT;
+const rng = s => () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+// ---- 譜面：音も映像もここから読む ----
+const EV = [], R0 = rng(20);
+const BASS = [43.65, 43.65, 51.91, 38.89];   // F1 F1 G#1 D#1（小節ごと）
+for (let b = 0; b < 32; b++) {
+  const T = b * BEAT, bar = Math.floor(b / 4);
+  if (b < 29) EV.push({ t: T, type: 'kick', v: b % 4 === 0 ? 1 : 0.85 });
+  if (b % 2 === 1 && b < 28) EV.push({ t: T, type: 'clap' });
+  if (b % 16 === 0) EV.push({ t: T, type: 'stab' });
+  if (b < 28) {
+    EV.push({ t: T + BEAT / 2, type: 'bass', v: BASS[bar % 4] });
+    for (let i = 0; i < 4; i++) {
+      const r = R0();
+      if (i % 2 === 1 || r < 0.5) EV.push({ t: T + i * BEAT / 4, type: 'click', v: i === 2 ? 1 : 0.3 + r * 0.6 });
+      if (r > 0.86 && i) EV.push({ t: T + i * BEAT / 4, type: 'blip', v: [1760, 2349, 2637, 3520][R0() * 4 | 0] });
+    }
+  }
+}
+for (let x = 28 * BEAT, i = 0; x < LOOP - 0.01; i++) { EV.push({ t: x, type: 'snare', v: i }); x += x < 30 * BEAT ? BEAT / 2 : x < 31 * BEAT ? BEAT / 4 : BEAT / 8; }   // 最後の小節：ロールで頭へ戻る
+EV.sort((a, b) => a.t - b.t);
+const last = (tl, type) => { let x = -99; for (const e of EV) { if (e.t > tl) break; if (e.type === type) x = e.t; } return x; };
+const count = (tl, type) => { let n = 0; for (const e of EV) { if (e.t > tl) break; if (e.type === type) n++; } return n; };
+
+// ---- 音 ----
+let ac = null, t0 = 0, out, verb, noiseBuf, nextEv = 0, loopN = 0;
+function audio() {
+  if (ac) return;
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4;
+  out = ac.createGain(); out.gain.value = 0.8; out.connect(comp); comp.connect(ac.destination);
+  window.audioDest = ac.createMediaStreamDestination ? ac.createMediaStreamDestination() : null;
+  if (audioDest) comp.connect(audioDest);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const L = ac.sampleRate * 2.5, ir = ac.createBuffer(2, L, ac.sampleRate);
+  for (let ch = 0; ch < 2; ch++) { const x = ir.getChannelData(ch); for (let i = 0; i < L; i++) x[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / L, 5); }
+  verb = ac.createConvolver(); verb.buffer = ir; const vg = ac.createGain(); vg.gain.value = 0.5; verb.connect(vg); vg.connect(out);
+  t0 = ac.currentTime + 0.05;
+  setInterval(schedule, 25); schedule();
+}
+function schedule() {   // 0.2秒先まで鳴らしておく。ループの頭で譜面を読み直す
+  for (;;) {
+    if (nextEv >= EV.length) { nextEv = 0; loopN++; }
+    const e = EV[nextEv], t = t0 + loopN * LOOP + e.t;
+    if (t > ac.currentTime + 0.2) break;
+    nextEv++;
+    if (t < ac.currentTime - 0.05) continue;
+    ({ kick, clap, click, bass, blip, snare, stab })[e.type](t, e.v);
+  }
+}
+function noise(t, len) { const n = ac.createBufferSource(); n.buffer = noiseBuf; n.loop = true; n.start(t, Math.random()); n.stop(t + len); return n; }
+const shCurve = new Float32Array(256).map((_, i) => Math.tanh(1.8 * (i / 128 - 1)));
+function env(g, t, v, d) { g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.001, t + d); }
+function kick(t, v) {   // 短く締まったキック
+  const o = ac.createOscillator(), g = ac.createGain(), sh = ac.createWaveShaper(); sh.curve = shCurve;
+  o.frequency.setValueAtTime(170, t); o.frequency.exponentialRampToValueAtTime(46, t + 0.06);
+  env(g, t, v, 0.28); o.connect(sh); sh.connect(g); g.connect(out); o.start(t); o.stop(t + 0.3);
+}
+function clap(t) {   // ずらした短いノイズ3つ＋尾
+  const g = ac.createGain(), f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1700; f.Q.value = 1.4; f.connect(g); g.connect(out); g.connect(verb);
+  for (const dt of [0, 0.01, 0.021]) noise(t + dt, 0.01).connect(f);
+  noise(t + 0.03, 0.15).connect(f);
+  g.gain.setValueAtTime(0.5, t); g.gain.setValueAtTime(0.5, t + 0.03); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+}
+function click(t, v) {   // クリック：ごく短いノイズを細い帯域に通す（周波数は毎回ばらつく）
+  const n = noise(t, 0.02), f = ac.createBiquadFilter(), g = ac.createGain(); f.type = 'bandpass'; f.frequency.value = 3000 + Math.random() * 7000; f.Q.value = 9;
+  env(g, t, 0.5 * v, 0.012 + 0.01 * v); n.connect(f); f.connect(g); g.connect(out);
+}
+function bass(t, fr) {   // 裏の低いサイン：少し歪ませて輪郭を出す
+  const o = ac.createOscillator(), g = ac.createGain(), sh = ac.createWaveShaper(); sh.curve = shCurve;
+  o.frequency.setValueAtTime(fr * 1.5, t); o.frequency.exponentialRampToValueAtTime(fr, t + 0.02);
+  env(g, t, 0.55, 0.2); o.connect(sh); sh.connect(g); g.connect(out); o.start(t); o.stop(t + 0.22);
+}
+function blip(t, fr) {   // 電子音のピッ：矩形波が一瞬で下がる。残響へ
+  const o = ac.createOscillator(), g = ac.createGain(); o.type = 'square';
+  o.frequency.setValueAtTime(fr, t); o.frequency.exponentialRampToValueAtTime(fr / 4, t + 0.05);
+  env(g, t, 0.06, 0.06); o.connect(g); g.connect(out); g.connect(verb); o.start(t); o.stop(t + 0.07);
+}
+function snare(t, i) {   // ロール：だんだん細かく、大きく、高く
+  const n = noise(t, 0.08), f = ac.createBiquadFilter(), g = ac.createGain(); f.type = 'bandpass'; f.frequency.value = 1400 + i * 140; f.Q.value = 1;
+  env(g, t, 0.12 + i * 0.02, 0.07); n.connect(f); f.connect(g); g.connect(out); g.connect(verb);
+}
+function stab(t) {   // 8小節の頭と中ほど：Fm の和音を、こもらせて残響で伸ばす
+  const f = ac.createBiquadFilter(), g = ac.createGain(); f.type = 'lowpass'; f.Q.value = 4;
+  f.frequency.setValueAtTime(2400, t); f.frequency.exponentialRampToValueAtTime(300, t + 0.4);
+  env(g, t, 0.12, 0.6); f.connect(g); g.connect(out); g.connect(verb);
+  for (const fr of [174.6, 207.7, 261.6, 311.1]) { const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = fr; o.connect(f); o.start(t); o.stop(t + 0.62); }
+}
+
+// ---- 映像 ----
+const c = document.getElementById('c');
+const gl = c.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+gl.getExtension('EXT_color_buffer_float');
+const COMMON = `#version 300 es
+precision highp float; precision highp int;
+uint pcg(uint v) { uint s = v * 747796405u + 2891336453u; uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+float h1(inout uint s) { s = pcg(s); return float(s) / 4294967295.; }
+`;
+const QUAD_VS = `#version 300 es
+void main() { vec2 p = vec2((gl_VertexID & 1) * 4 - 1, (gl_VertexID & 2) * 2 - 1); gl_Position = vec4(p, 0, 1); }`;
+
+// 反応拡散（Gray-Scott）：開いた時に一度だけ回して迷路の模様を作り、明るさで太さを決めて網点の代わりに使う
+const RD_INIT = COMMON + `
+out vec4 o;
+void main() { uint s = pcg(uint(gl_FragCoord.x / 5.) + uint(gl_FragCoord.y / 5.) * 4099u); float v = h1(s) < .2 ? .25 : 0.; o = vec4(1. - 2. * v, v, 0, 1); }`;
+const RD_STEP = `#version 300 es
+precision highp float;
+uniform sampler2D s; uniform float F, K;
+out vec4 o;
+vec2 T(ivec2 p, ivec2 n) { return texelFetch(s, (p + n) % n, 0).rg; }
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy), n = textureSize(s, 0);
+  vec2 c = T(p, n);
+  vec2 lap = -c + .2 * (T(p + ivec2(1, 0), n) + T(p + ivec2(-1, 0) + n, n) + T(p + ivec2(0, 1), n) + T(p + ivec2(0, -1) + n, n))
+           + .05 * (T(p + ivec2(1, 1), n) + T(p + ivec2(-1, 1) + n, n) + T(p + ivec2(1, -1) + n, n) + T(p + ivec2(-1, -1) + n, n));
+  float uvv = c.r * c.g * c.g;
+  o = vec4(c.r + lap.x - uvv + F * (1. - c.r), c.g + .5 * lap.y + uvv - (F + K) * c.g, 0, 1);
+}`;
+
+// 本体：短冊（cols × rows のマス）ごとに、マスの真ん中を中心に拡大して写真を読む。拡大の上乗せは波 wx の近くのマスほど大きい。
+// そのあと縦の帯ごとに、読んだ明るさを別の網点にする
+const MAIN_FS = COMMON + `
+uniform sampler2D img, rd; uniform vec2 res, ires;
+uniform float rows, cols, wx, wAmp, wW, sweep, base, shift, pitch, ang, gain, gam, rdS, zoom0, invRow, u;
+uniform vec3 bnd; uniform ivec4 modes; uniform float q[33]; uniform uint seed, fseed;
+out vec4 o;
+float lumAt(vec2 p) {
+  vec2 cell = vec2(cols, rows), id = floor(clamp(p / res, 0., .9999) * cell), cc = (id + .5) / cell * res;
+  uint h = pcg(uint(id.y) * 131u + uint(id.x) * 7919u + seed); float r1 = h1(h), r2 = h1(h);
+  float s = mix(cc.x / res.x, cc.y / res.y, sweep);
+  float z = 1. + base * r1 + wAmp * exp(-pow((s - wx) / wW, 2.));
+  vec2 qq = cc + (p - cc) / z; qq.x += (r2 - .5) * shift * res.x;
+  float sc = max(res.x / ires.x, res.y / ires.y) * zoom0;
+  vec2 uv = (qq - res * .5) / sc / ires + .5;
+  uv = abs(mod(uv + 1., 2.) - 1.);   // はみ出したら鏡に折り返す
+  float L = dot(texture(img, uv).rgb, vec3(.299, .587, .114));
+  return pow(clamp(L * gain, 0., 1.), gam);
+}
+// 振幅変調の網点：網目を ang だけ回し、点の真ん中の明るさで大きさを決める。hex は1段おきに半分ずらす
+float am(vec2 p, float P, float a, bool hex, int shape) {
+  float c = cos(a), s = sin(a); mat2 R = mat2(c, s, -s, c);
+  vec2 g = R * p / P; float sh = 0.;
+  if (hex) { g.y /= .866; sh = mod(floor(g.y), 2.) * .5; g.x += sh; }
+  vec2 id = floor(g), f = fract(g) - .5, cg = id + .5; cg.x -= sh;
+  if (hex) { cg.y *= .866; f.y *= .866; }
+  float d = 1. - lumAt(transpose(R) * cg * P);
+  float dist = shape == 0 ? length(f) : (abs(f.x) + abs(f.y)) * .72;
+  float r = sqrt(d) * .66, w = .8 / P;
+  return smoothstep(r - w, r + w, dist);
+}
+void main() {
+  vec2 p = vec2(gl_FragCoord.x, res.y - gl_FragCoord.y);
+  float x = p.x / res.x; int b = x < bnd.x ? 0 : x < bnd.y ? 1 : x < bnd.z ? 2 : 3;
+  int m = b == 0 ? modes.x : b == 1 ? modes.y : b == 2 ? modes.z : modes.w;
+  float col;
+  if (m == 0) col = am(p, pitch * 1.7, ang, true, 0);   // 粗い丸い点
+  else if (m == 1) {   // 迷路：模様の値の分布から、黒の割合が暗さと同じになるしきい値を引く
+    float k = lumAt(p) * 32.; int i = int(min(k, 31.)); float thr = mix(q[i], q[i + 1], k - float(i));
+    float v = texture(rd, p / (rdS * u * 1024.)).r;
+    col = 1. - smoothstep(thr - .012, thr + .012, v);
+  } else if (m == 2) {   // 細かい点：2px のマスごとに、暗さの確率で黒
+    uvec2 c2 = uvec2(p / (2. * u)); uint hh = pcg(c2.x * 73856093u ^ c2.y * 19349663u);
+    col = h1(hh) < pow(1. - lumAt(p), 1.3) ? 0. : 1.;
+  } else if (m == 3) {   // 写真のまま（粒を足す）
+    uint gh = pcg(uint(p.x) + uint(p.y) * 4096u + fseed); col = lumAt(p) + (h1(gh) - .5) * .14;
+  } else if (m == 4) {   // 二値のブロック
+    float bs = 7. * u; vec2 pb = (floor(p / bs) + .5) * bs; col = lumAt(pb) < .45 ? 0. : 1.;
+  } else col = am(p, pitch * .75, ang + .785, false, 1);   // 細かいひし形
+  if (floor(p.y / res.y * rows) == invRow) col = 1. - col;   // 電子音で1段だけ反転
+  o = vec4(vec3(clamp(col, 0., 1.)), 1);
+}`;
+function prog(vs, fs) {
+  const p = gl.createProgram();
+  for (const [t, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const sh = gl.createShader(t); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(p, sh);
+  }
+  gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const loc = {}; p.u = n => n in loc ? loc[n] : (loc[n] = gl.getUniformLocation(p, n));
+  return p;
+}
+function tex(filter, wrap) {
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+  return t;
+}
+const P_MAIN = prog(QUAD_VS, MAIN_FS);
+
+// 反応拡散を 1024×1024 で回す（端はつながっているので、並べても継ぎ目が出ない）。終わったら 8bit に移し、値の分布（33点）を取る
+const RDN = 1024, rdTex = tex(gl.LINEAR, gl.REPEAT), Q = new Float32Array(33);
+{
+  const P_INIT = prog(QUAD_VS, RD_INIT), P_STEP = prog(QUAD_VS, RD_STEP);
+  const fb = [0, 1].map(() => { const t = tex(gl.NEAREST, gl.REPEAT); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, RDN, RDN, 0, gl.RGBA, gl.FLOAT, null); const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); return { t, f }; });
+  gl.viewport(0, 0, RDN, RDN);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb[0].f); gl.useProgram(P_INIT); gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.useProgram(P_STEP); gl.uniform1f(P_STEP.u('F'), 0.029); gl.uniform1f(P_STEP.u('K'), 0.057); gl.uniform1i(P_STEP.u('s'), 0);
+  gl.activeTexture(gl.TEXTURE0);
+  for (let i = 0, cur = 0; i < 4000; i++, cur = 1 - cur) { gl.bindFramebuffer(gl.FRAMEBUFFER, fb[1 - cur].f); gl.bindTexture(gl.TEXTURE_2D, fb[cur].t); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+  const px = new Float32Array(RDN * RDN * 4); gl.readPixels(0, 0, RDN, RDN, gl.RGBA, gl.FLOAT, px);   // 4000 回は偶数なので fb[0] が最後
+  let mx = 1e-6; for (let i = 1; i < px.length; i += 4) mx = Math.max(mx, px[i]);
+  const v8 = new Uint8Array(RDN * RDN); for (let i = 0; i < v8.length; i++) v8[i] = Math.round(px[i * 4 + 1] / mx * 255);
+  gl.bindTexture(gl.TEXTURE_2D, rdTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, RDN, RDN, 0, gl.RED, gl.UNSIGNED_BYTE, v8);
+  const smp = Array.from({ length: 65536 }, (_, i) => v8[(i * 16 + (i >> 6)) % v8.length] / 255).sort((a, b) => a - b);
+  for (let i = 0; i <= 32; i++) Q[i] = smp[Math.min(smp.length - 1, Math.floor(i / 32 * smp.length))];
+  Q[32] = 1.01;
+  for (const f of fb) { gl.deleteTexture(f.t); gl.deleteFramebuffer(f.f); }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+const imgTex = tex(gl.LINEAR, gl.CLAMP_TO_EDGE); let IW = 0, IH = 0;
+const im = new Image(); im.src = 'src/face_v1.jpg';
+im.onload = () => { gl.bindTexture(gl.TEXTURE_2D, imgTex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, im); IW = im.width; IH = im.height; };
+
+let W, H, S;
+function setSize() { [W, H] = document.getElementById('aspect').value.split('x').map(Number); c.width = W; c.height = H; S = Math.min(W, H); }
+
+// 帯の割り付け：クラップごとに、境目3本と各帯の網点を選び直す。最初は参考と同じ並び（粗い点・迷路・細かい点・写真）
+function layout(k) {
+  if (k === 0) return { bnd: [0.3, 0.52, 0.72], modes: [0, 1, 2, 3] };
+  const r = rng(k * 977 + 3), bnd = [r(), r(), r()].map(x => 0.12 + x * 0.76).sort((a, b) => a - b);
+  const m = [0, 1, 2, 3, 4, 5]; for (let i = 5; i > 0; i--) { const j = r() * (i + 1) | 0; [m[i], m[j]] = [m[j], m[i]]; }
+  return { bnd, modes: m.slice(0, 4) };
+}
+const ROWS = [18, 26, 18, 34, 22, 30, 18, 32], COLS = [1, 1, 1, 3, 1, 2, 1, 1];
+let frameN = 0;
+function frame() {
+  requestAnimationFrame(frame);
+  if (!IW) return;
+  const tl = ac ? Math.max(0, ac.currentTime - t0) % LOOP : (performance.now() / 1000) % LOOP;
+  const bar = Math.floor(tl / BAR);
+  const env = (type, d) => Math.exp(-(tl - last(tl, type)) / d);
+  const kHit = env('kick', 0.1), clk = env('click', 0.03), bl = env('blip', 0.06);
+  const roll = tl > 28 * BEAT ? (tl - 28 * BEAT) / (4 * BEAT) : 0;
+  // 拡大の波：1小節で端から端へ、次の小節で戻る（ループの頭と終わりで同じ位置：8小節は偶数）
+  const ph = (tl % (2 * BAR)) / BAR, sw = ph < 1 ? ph : 2 - ph, wx = -0.15 + 1.3 * sw * sw * (3 - 2 * sw);
+  const cols = COLS[bar], rows = roll > 0 ? ROWS[7] * 2 ** Math.floor(roll * 3) : ROWS[bar];
+  const k = count(tl, 'clap'), L = layout(k);
+  const blipT = last(tl, 'blip');
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.useProgram(P_MAIN);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, imgTex); gl.uniform1i(P_MAIN.u('img'), 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, rdTex); gl.uniform1i(P_MAIN.u('rd'), 1);
+  gl.uniform2f(P_MAIN.u('res'), W, H); gl.uniform2f(P_MAIN.u('ires'), IW, IH);
+  const u = S / 1080;
+  for (const [n, x] of Object.entries({
+    rows, cols, wx, wAmp: 1.6 + 2 * kHit + 3 * roll, wW: 0.2 + 0.12 * roll, sweep: cols > 1 ? 0.2 : 1,
+    base: 0.6 + 0.6 * kHit + roll, shift: 0.035 * clk + 0.08 * bl, pitch: 11 * u * (1 + 0.35 * kHit), ang: 0.35 + tl * 0.04,
+    gain: 1.08, gam: 1.15, rdS: 1.7, zoom0: H / W > 1.5 ? 1 : 1.35, u,   // 9:16 は横が狭いので寄せない
+    invRow: bl > 0.4 ? Math.floor(rng(blipT * 1000 | 0)() * rows) : -1,
+  })) gl.uniform1f(P_MAIN.u(n), x);
+  gl.uniform3f(P_MAIN.u('bnd'), ...L.bnd); gl.uniform4i(P_MAIN.u('modes'), ...L.modes);
+  gl.uniform1fv(P_MAIN.u('q[0]'), Q);
+  gl.uniform1ui(P_MAIN.u('seed'), (k * 7 + bar * 131) >>> 0);   // 短冊ごとのばらつきはクラップと小節で変わる
+  gl.uniform1ui(P_MAIN.u('fseed'), ++frameN);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+document.getElementById('aspect').onchange = setSize; setSize();
+requestAnimationFrame(frame);
+document.getElementById('play').onclick = audio;
+c.onpointerdown = audio;
+
+document.getElementById('rec').onclick = e => {
+  audio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `raster_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+</script>
+</body>
+</html>
