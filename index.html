@@ -77,17 +77,30 @@
   <p><a href="https://x.com/very_tired">X</a> / <a href="https://www.instagram.com/verytired.developer/">Instagram</a> / <a href="https://www.youtube.com/@verytired.developer">YouTube</a> / <a href="https://github.com/verytired">GitHub</a></p>
 </footer>
 <script>
-// 背景: 文字で描く干渉縞（ertdfgcvb 風）。動きを減らす設定なら止める
+// 背景: 文字で描く干渉縞（ertdfgcvb 風）。カーソルのまわりが渦を巻き、押すと波紋が広がり、スクロールで縞が流れる。動きを減らす設定なら止める
 const pre = document.getElementById('field'), chars = ' .·:-=+*#%@';
 const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
-let cols, rows;
-const resize = () => { cols = Math.ceil(innerWidth / 7.8); rows = Math.ceil(innerHeight / 13); };
+let cols, rows, mx = -1e3, my = -1e3, ripples = [];
+// 1文字の幅は実測する（フォントで変わる。決め打ちだと右端まで届かずカーソルともずれる）
+pre.textContent = '@'.repeat(100); const range = document.createRange(); range.selectNodeContents(pre);
+const cw = range.getBoundingClientRect().width / 100 || 7.8, ch = 13;
+const resize = () => { cols = Math.ceil(innerWidth / cw); rows = Math.ceil(innerHeight / ch); };
 addEventListener('resize', resize); resize();
+addEventListener('pointermove', e => { mx = e.clientX / cw; my = e.clientY / ch; });
+addEventListener('pointerdown', e => { ripples.push({ x: e.clientX / cw, y: e.clientY / ch, t: performance.now() }); ripples = ripples.slice(-6); });
 const draw = t => {
+  const sy = scrollY * .01;
+  ripples = ripples.filter(r => t - r.t < 2500);
   let s = '';
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
-      const v = Math.sin(x * .09 + t * .0007) + Math.sin(y * .17 - t * .0005) + Math.sin(Math.hypot(x - cols / 2, (y - rows / 2) * 2) * .12 - t * .001);
+      let v = Math.sin(x * .09 + t * .0007 + sy) + Math.sin(y * .17 - t * .0005 - sy * 2) + Math.sin(Math.hypot(x - cols / 2, (y - rows / 2) * 2) * .12 - t * .001);
+      const d = Math.hypot(x - mx, (y - my) * 2);
+      v += Math.exp(-d / 20) * 3 * (1 + Math.sin(d * .4 - t * .008));  // カーソルのまわりが明るく脈打つ
+      for (const r of ripples) {
+        const a = (t - r.t) / 2500, e = Math.hypot(x - r.x, (y - r.y) * 2) - a * 120;
+        v += Math.exp(-e * e / 6) * 5 * (1 - a);  // 波紋の輪
+      }
       s += chars[Math.max(0, Math.min(chars.length - 1, Math.floor((v + 3) / 6 * chars.length)))];
     }
     s += '\n';

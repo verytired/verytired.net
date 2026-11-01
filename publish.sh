@@ -1,5 +1,5 @@
 #!/bin/zsh
-# その日の分までをビルドして main に push する（launchd から毎日実行）
+# その日の分までをビルドして main に push する（指示したときだけ手で実行する）
 set -e
 cd "${0:A:h}"
 ./ga.py || echo "ga.py に失敗（サイトの公開は続ける）"
