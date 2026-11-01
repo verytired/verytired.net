@@ -4,7 +4,7 @@
 使い方: python3 build.py [../hitori_av]
 - lab/<名前>/piece.html  … 作品の HTML をそのままコピー（自己完結しているので書き換えない）
 - lab/<名前>/index.html  … player.html で piece.html を包む（英語の操作バー）
-- lab/<名前>/src/       … 作品が読む素材のフォルダ（あればそのままコピー）
+- lab/<名前>/src/       … 作品が読む素材（src="…" に書いてある mp4 だけ。名前を組み立てて読む作品はフォルダごと）
 - lab/<名前>/**.sp.mp4  … 素材の動画のスマホ向けの軽い版（540px 幅・無音）
 - lab/<名前>/loop.mp4     … 1:1 版の mp4 から作る無音・480px・8秒のループ（元の mp4 はサイトに入れない）
 - index.html                  … template.html の {{ITEMS}} を埋める
@@ -46,11 +46,13 @@ def build_item(d):
     dst.mkdir(parents=True, exist_ok=True)
     if piece.exists():
         shutil.copy(piece, dst / "piece.html")
-        for src in re.findall(r'src="([^"/]+\.mp4)"', piece.read_text(errors="ignore")):
-            if (d / src).exists():
-                shutil.copy2(d / src, dst / src)  # 作品が素材として読む動画（slowdive の dive.mp4 など）はそのまま置く
-        if (d / "src").is_dir() and "src/" in piece.read_text(errors="ignore"):
-            shutil.copytree(d / "src", dst / "src", dirs_exist_ok=True)  # 素材をフォルダで読む作品（ghostidol の src/*.mp4）
+        text = piece.read_text(errors="ignore")
+        refs = [s for s in re.findall(r'src="([^"]+\.mp4)"', text) if (d / s).exists()]
+        for s in refs:  # 作品が素材として読む動画（slowdive の dive.mp4、fold の src/fold_src.mp4 など）はそのまま置く
+            (dst / s).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(d / s, dst / s)
+        if (d / "src").is_dir() and "src/" in text and not any(s.startswith("src/") for s in refs):
+            shutil.copytree(d / "src", dst / "src", dirs_exist_ok=True)  # 名前を組み立てて読む作品（ghostidol の src/${n}_v1.mp4）だけフォルダごと
         for m in [*dst.glob("*.mp4"), *dst.glob("src/*.mp4")]:
             if m.name != "loop.mp4" and not m.name.endswith(".sp.mp4"):
                 sp(m)

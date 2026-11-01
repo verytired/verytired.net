@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fold</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&display=block">
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="15"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<video src="src/fold_src.mp4" muted loop playsinline preload="auto"></video>
+
+<script>
+// 90年代のビデオカメラで撮った資料映像のような「事件」の4場面を、128 BPM のビートでつなぐ15秒のループ（32拍＝8小節、1場面8拍）。
+// キックで空間が一瞬折れて前へ押し出され、クラップで横にずれて割れる。場面の終わりは動画を刻んで（スタッター）、最後の小節は渦に巻き込まれて頭へ戻る
+const BPM = 128, BEAT = 60 / BPM, LOOP = 32 * BEAT, SCENE = 8 * BEAT;   // LOOP = 15秒ちょうど
+const vid = document.querySelector('video');   // 4場面をつなぎ、劣化とデータモッシュを焼き込んだ15秒（src/prep.py で作る）
+
+// ---- 譜面：音も映像もここから読む ----
+const EV = [];
+for (let b = 0; b < 32; b++) {
+  const T = b * BEAT, bar = Math.floor(b / 4);
+  EV.push({ t: T, type: 'kick', v: b % 4 === 0 ? 1 : 0.8 });
+  EV.push({ t: T + BEAT / 2, type: 'hat' }, { t: T + BEAT / 2, type: 'bass' }, { t: T + BEAT * 0.75, type: 'bass', v: 0.6 });
+  if (b % 2 === 1 && b < 28) EV.push({ t: T, type: 'clap' });   // 2拍目と4拍目
+  if (b % 8 === 0) EV.push({ t: T, type: 'cut' });   // 場面の頭：衝撃とこする音
+}
+for (let x = 28 * BEAT, i = 0; x < LOOP - 0.01; i++) { EV.push({ t: x, type: 'snare', v: i }); x += x < 30 * BEAT ? BEAT / 2 : x < 31 * BEAT ? BEAT / 4 : BEAT / 8; }   // 最後の小節：スネアのロールで頭へ戻る
+EV.sort((a, b) => a.t - b.t);
+const last = (tl, type) => { let x = -99; for (const e of EV) { if (e.t > tl) break; if (e.type === type) x = e.t; } return x; };
+
+// ---- 音 ----
+let ac = null, t0 = 0, out, verb, noiseBuf, nextEv = 0, loopN = 0;
+function audio() {
+  if (ac) return;
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 4;
+  out = ac.createGain(); out.gain.value = 0.8; out.connect(comp); comp.connect(ac.destination);
+  window.audioDest = ac.createMediaStreamDestination ? ac.createMediaStreamDestination() : null;
+  if (audioDest) comp.connect(audioDest);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const L = ac.sampleRate * 4, ir = ac.createBuffer(2, L, ac.sampleRate);
+  for (let ch = 0; ch < 2; ch++) { const x = ir.getChannelData(ch); for (let i = 0; i < L; i++) x[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / L, 4); }
+  verb = ac.createConvolver(); verb.buffer = ir; const vg = ac.createGain(); vg.gain.value = 0.6; verb.connect(vg); vg.connect(out);
+  // 底の唸り：少しずらしたノコギリ（F と半音上の F♯ の不協和）を低くこもらせる。ループの長さでゆっくり開いて閉じる
+  const dr = ac.createGain(), df = ac.createBiquadFilter(); df.type = 'lowpass'; df.Q.value = 3; df.frequency.value = 300; dr.gain.value = 0.09;
+  const lfo = ac.createOscillator(), lg = ac.createGain(); lfo.frequency.value = 1 / LOOP; lg.gain.value = 180; lfo.connect(lg); lg.connect(df.frequency); lfo.start();
+  df.connect(dr); dr.connect(out); dr.connect(verb);
+  [655, 659, 981, 1387].map(n => n / LOOP).forEach(f => { const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.connect(df); o.start(); });
+  const hs = noise(ac.currentTime, 1e5), hf = ac.createBiquadFilter(), hg = ac.createGain(); hf.type = 'highpass'; hf.frequency.value = 4000; hg.gain.value = 0.03;   // テープのヒス
+  hs.connect(hf); hf.connect(hg); hg.connect(out);
+  t0 = ac.currentTime + 0.05;
+  setInterval(schedule, 25); schedule();
+}
+function schedule() {   // 0.2秒先まで鳴らしておく。ループの頭で譜面を読み直す
+  for (;;) {
+    if (nextEv >= EV.length) { nextEv = 0; loopN++; }
+    const e = EV[nextEv], t = t0 + loopN * LOOP + e.t;
+    if (t > ac.currentTime + 0.2) break;
+    nextEv++;
+    if (t < ac.currentTime - 0.05) continue;
+    ({ kick, hat, bass, clap, snare, cut })[e.type](t, e.v);
+  }
+}
+function noise(t, len) { const n = ac.createBufferSource(); n.buffer = noiseBuf; n.loop = true; n.start(t, Math.random()); n.stop(t + len); return n; }
+const shCurve = new Float32Array(256).map((_, i) => Math.tanh(3 * (i / 128 - 1)));
+function kick(t, v) {   // 歪んだ硬いキック：高い所から一気に落ちるサイン
+  const o = ac.createOscillator(), g = ac.createGain(), sh = ac.createWaveShaper(); sh.curve = shCurve;
+  o.frequency.setValueAtTime(160, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.09);
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.38);
+  o.connect(sh); sh.connect(g); g.connect(out); o.start(t); o.stop(t + 0.4);
+}
+function hat(t) {   // 裏のハット
+  const n = noise(t, 0.05), f = ac.createBiquadFilter(), g = ac.createGain(); f.type = 'highpass'; f.frequency.value = 8000;
+  g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.05); n.connect(f); f.connect(g); g.connect(out);
+}
+function bass(t, v = 1) {   // 裏で転がる低いノコギリ（F）
+  const o = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain(); o.type = 'sawtooth'; o.frequency.value = 43.65;
+  f.type = 'lowpass'; f.Q.value = 6; f.frequency.setValueAtTime(900, t); f.frequency.exponentialRampToValueAtTime(120, t + 0.12);
+  g.gain.setValueAtTime(0.32 * v, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.15); o.connect(f); f.connect(g); g.connect(out); o.start(t); o.stop(t + 0.16);
+}
+function clap(t) {   // クラップ：ずらした短いノイズ3つ。残響へ多めに
+  const g = ac.createGain(), f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1500; f.Q.value = 1.2; f.connect(g); g.connect(out); g.connect(verb);
+  for (const dt of [0, 0.011, 0.023]) { const n = noise(t + dt, 0.012); n.connect(f); }
+  const n = noise(t + 0.03, 0.2); n.connect(f);
+  g.gain.setValueAtTime(0.6, t); g.gain.setValueAtTime(0.6, t + 0.03); g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+}
+function snare(t, i) {   // ロール：だんだん細かく、大きく、高く
+  const n = noise(t, 0.1), f = ac.createBiquadFilter(), g = ac.createGain(); f.type = 'bandpass'; f.frequency.value = 1200 + i * 120; f.Q.value = 0.9;
+  g.gain.setValueAtTime(0.15 + i * 0.022, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.09); n.connect(f); f.connect(g); g.connect(out); g.connect(verb);
+}
+function cut(t) {   // 場面の頭：低い衝撃と、金属をこするように下へ滑るノイズ
+  const o = ac.createOscillator(), og = ac.createGain(); o.frequency.setValueAtTime(70, t); o.frequency.exponentialRampToValueAtTime(28, t + 0.8);
+  og.gain.setValueAtTime(0.5, t); og.gain.exponentialRampToValueAtTime(0.001, t + 1); o.connect(og); og.connect(out); og.connect(verb); o.start(t); o.stop(t + 1);
+  const n = noise(t, 1), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.Q.value = 18; f.frequency.setValueAtTime(3200, t); f.frequency.exponentialRampToValueAtTime(300, t + 0.9);
+  g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 1); n.connect(f); f.connect(g); g.connect(out); g.connect(verb);
+}
+
+// ---- 映像 ----
+const c = document.getElementById('c');
+const gl = c.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+const COMMON = `#version 300 es
+precision highp float; precision highp int;
+uint pcg(uint v) { uint s = v * 747796405u + 2891336453u; uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+float h1(inout uint s) { s = pcg(s); return float(s) / 4294967295.; }
+`;
+const QUAD_VS = `#version 300 es
+void main() { vec2 p = vec2((gl_VertexID & 1) * 4 - 1, (gl_VertexID & 2) * 2 - 1); gl_Position = vec4(p, 0, 1); }`;
+// 1枚目：時間のずらし。過去 N コマを溜めておき、画面の場所ごとに違う古さのコマを読む。
+// 中心からの輪ごとに古くすると、人の流れが輪になって奥へ伸び、トンネルのように巻き込まれる。spiral で輪が渦になる。slit で横の帯ごとにばらばらの古さ
+const N = 24;
+const FB_FS = COMMON + `
+uniform highp sampler2DArray hist; uniform int head, N; uniform vec2 res, vres; uniform float disp, ring, spiral, slit, t, S, zoom; uniform uint seed;
+out vec4 o;
+void main() {
+  vec2 p = gl_FragCoord.xy - res * .5, n = p / S / zoom;
+  float r = length(n), a = atan(n.y, n.x) / 6.2832;
+  float m = fract(r * ring - t * .8 + a * spiral);   // .8 × 15秒 = 12周：ループの継ぎ目で輪の位置が飛ばない
+  uint hs = pcg(uint(gl_FragCoord.y / (S * .03)) ^ seed); float band = h1(hs);
+  float d = disp * mix(m, band, slit) * float(N - 1);
+  int layer = (head - int(d) + N * 4) % N;
+  float sc = max(res.x / vres.x, res.y / vres.y);
+  vec2 uv = vec2(n.x, -n.y) * S / (vres * sc) + .5;
+  uv = abs(mod(uv + 1., 2.) - 1.);   // はみ出したら鏡に折り返す
+  o = texture(hist, vec3(uv, float(layer)));
+}`;
+const POST_FS = COMMON + `
+uniform sampler2D acc, osd; uniform vec2 res; uniform float t, S, flash, inv, ca, slice, track; uniform uint seed;
+out vec4 o;
+vec3 rd(vec2 q) { return texture(acc, q / res).rgb; }
+void main() {
+  vec2 p = gl_FragCoord.xy; float u = S / 1080.;
+  uint hl = pcg(uint(p.y / (2. * u)) ^ seed); float jit = (h1(hl) - .5) * 2.5 * u;
+  float yb = p.y / res.y; if (yb < .06) jit += (h1(hl) - .3) * 40. * u * track;   // 下の端でテープが揺れる
+  if (abs(yb - fract(t * 2. / 15. + .2)) < .012) jit += 30. * u * track;   // ゆっくり上がる乱れの帯
+  if (slice > .02) { uint hs = pcg(uint(p.y / (36. * u)) ^ seed * 31u); if (h1(hs) < .45 * slice) jit += (h1(hs) - .5) * 260. * u * slice; }   // クラップ：横の帯がずれる
+  p.x += jit;
+  vec3 lum = vec3(0), chr = vec3(0);
+  for (int i = -3; i <= 3; i++) lum += rd(p + vec2(float(i) * 1.4 * u, 0));   // 明るさは少しだけ横にぼかす
+  for (int i = -6; i <= 6; i++) chr += rd(p + vec2(float(i) * 3. * u + 5. * u, 0));   // 色はもっとぼかして右へずらす（色のにじみ）
+  float rr = rd(p + vec2(ca * u, 0)).r, bb = rd(p - vec2(ca * u, 0)).b;   // 赤と青を左右に割る（キックで大きく）
+  lum /= 7.; chr /= 13.; chr.r = mix(chr.r, rr, .7); chr.b = mix(chr.b, bb, .7);
+  float Y = dot(lum, vec3(.299, .587, .114)); vec3 C = chr - dot(chr, vec3(.299, .587, .114));
+  vec3 col = Y + C * .55;
+  float red = smoothstep(.04, .15, chr.r - max(chr.g, chr.b)); col = mix(col, col + vec3(.12, -.03, .02), red);   // 赤い光だけ残す
+  col = (col - .5) * 1.15 + .5 + vec3(.02, 0, .03);
+  col *= .9 + .1 * sin(gl_FragCoord.y * 3.1416 / (2. * u));   // 走査線
+  uint hn = pcg(uint(gl_FragCoord.x) * 1973u ^ uint(gl_FragCoord.y) * 9277u ^ seed); col += (h1(hn) - .5) * .09;
+  vec2 v = gl_FragCoord.xy / res - .5; col *= 1. - dot(v, v) * .9;   // 周辺を暗く
+  col = mix(col, vec3(h1(hn)), flash);   // 砂嵐
+  if (inv > .5) col = 1. - col;
+  vec4 od = texture(osd, vec2(gl_FragCoord.x / res.x, 1. - gl_FragCoord.y / res.y));
+  col = mix(col, od.rgb, od.a);
+  o = vec4(clamp(col, 0., 1.), 1);
+}`;
+function prog(fs) {
+  const p = gl.createProgram();
+  for (const [t, src] of [[gl.VERTEX_SHADER, QUAD_VS], [gl.FRAGMENT_SHADER, fs]]) {
+    const sh = gl.createShader(t); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(p, sh);
+  }
+  gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const loc = {}; p.u = n => n in loc ? loc[n] : (loc[n] = gl.getUniformLocation(p, n));
+  return p;
+}
+const P_FB = prog(FB_FS), P_POST = prog(POST_FS);
+function tex(w, h) {
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  if (w) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+const osdT = tex();
+const hist = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, hist);   // 過去 N コマ（素材の大きさのまま）
+gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA8, 720, 1280, N);
+gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+let head = 0;
+let W, H, S, ACC = [], cur = 0;
+const osd = document.createElement('canvas'), octx = osd.getContext('2d');
+function setSize() {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  c.width = osd.width = W; c.height = osd.height = H; S = Math.min(W, H);
+  ACC = [0, 1].map(() => { const t = tex(W, H), f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); return { t, f }; });
+}
+function drawOsd(tl) {   // ビデオカメラの画面表示：左上に再生と事件番号、右下に日付と時刻、左下に点滅する REC
+  octx.clearRect(0, 0, W, H);
+  const u = S / 1080, m = 70 * u;
+  octx.font = `${46 * u}px "VT323", "Courier New", monospace`; octx.fillStyle = '#eee'; octx.shadowColor = '#000'; octx.shadowBlur = 0; octx.shadowOffsetX = octx.shadowOffsetY = 3 * u;
+  octx.textAlign = 'left'; octx.fillText('PLAY ▶', m, m + 30 * u); octx.fillText('CASE 018', m, m + 82 * u);
+  const s = 59 * 60 + 7 + Math.floor(tl);
+  octx.textAlign = 'right';
+  octx.fillText('NOV. 1 1996', W - m, H - m - 56 * u);
+  const glitch = tl > 30 * BEAT || tl < BEAT / 2, d2 = x => glitch ? String(Math.floor(Math.random() * 100)).padStart(2, '0') : String(x).padStart(2, '0');   // ループの継ぎ目の前後は数字が乱れる（時刻が戻るのを隠す）
+  octx.fillText(`PM 11:${d2(Math.floor(s / 60) % 60)}:${d2(s % 60)}`, W - m, H - m);
+  if (Math.floor(tl / BEAT) % 2 === 0) { octx.textAlign = 'left'; octx.fillStyle = '#e33'; octx.fillText('● REC', m, H - m); }   // 拍に合わせて点滅
+  gl.bindTexture(gl.TEXTURE_2D, osdT); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, osd);
+}
+let frameN = 0;
+function frame() {
+  requestAnimationFrame(frame);
+  const tl = ac ? Math.max(0, ac.currentTime - t0) % LOOP : (performance.now() / 1000) % LOOP;
+  const scene = Math.min(3, Math.floor(tl / SCENE)), sc = tl - scene * SCENE;   // sc：場面の頭からの秒
+  const env = (type, d) => Math.exp(-(tl - last(tl, type)) / d);
+  const kHit = env('kick', 0.12), cHit = env('clap', 0.1), hHit = env('hat', 0.04), sHit = env('snare', 0.05);
+  const roll = tl > 28 * BEAT ? (tl - 28 * BEAT) / (4 * BEAT) : 0;   // 最後の小節：0→1
+  // 素材の動画：ふだんは流す。場面の最後の2拍は8分で刻み、最後の小節は16分・32分まで細かく刻む
+  let vt = tl;
+  const stut = roll > 0 ? (roll < 0.5 ? BEAT / 2 : roll < 0.75 ? BEAT / 4 : BEAT / 8) : sc > 6 * BEAT ? BEAT / 2 : 0;
+  if (stut) { const s0 = roll > 0 ? 4 * BEAT : 6 * BEAT; vt = Math.min(LOOP - 0.02, (scene + 1) * SCENE - stut + (sc - s0) % stut); }   // 場面の最後の区間をくり返す：切り替わる直前に映るのが、モッシュで引きずられるコマになる
+  if (Math.abs(vid.currentTime - vt) > 0.12) vid.currentTime = vt;
+  if (vid.readyState >= 2) { head = (head + 1) % N; gl.bindTexture(gl.TEXTURE_2D_ARRAY, hist); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, head, 720, 1280, 1, gl.RGBA, gl.UNSIGNED_BYTE, vid); }
+  // キック：輪になって古いコマが混ざり、前へ押し出される。クラップ：横の帯ごとにばらばらの古さ。最後の小節：渦になって奥へ吸い込まれる
+  const R = Math.max(roll, tl < 2 * BEAT ? (1 - tl / (2 * BEAT)) ** 2 : 0);   // 渦：ロールで巻き、ループの頭の2拍でほどける（継ぎ目で途切れない）
+  const disp = Math.min(1, 0.2 + 0.75 * kHit + 0.6 * cHit + 0.9 * R);
+  const ring = 3 + 4 * R, spiral = 3 * R ** 2, slit = Math.min(1, cHit * 1.5 + sHit * roll), zoom = 1 + 0.09 * kHit + 0.6 * R ** 3;
+  const nx = ACC[1 - cur];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, nx.f); gl.viewport(0, 0, W, H); gl.useProgram(P_FB);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY, hist); gl.uniform1i(P_FB.u('hist'), 0);
+  gl.uniform1i(P_FB.u('head'), head); gl.uniform1i(P_FB.u('N'), N);
+  gl.uniform2f(P_FB.u('res'), W, H); gl.uniform2f(P_FB.u('vres'), 720, 1280);
+  for (const [k, x] of Object.entries({ disp, ring, spiral, slit, t: tl, S, zoom })) gl.uniform1f(P_FB.u(k), x);
+  gl.uniform1ui(P_FB.u('seed'), Math.floor(Math.max(last(tl, 'clap'), last(tl, 'snare')) * 100) >>> 0);   // 帯の古さはクラップごとに変わる
+  gl.drawArrays(gl.TRIANGLES, 0, 3); cur = 1 - cur;
+  drawOsd(tl);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.useProgram(P_POST);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, nx.t); gl.uniform1i(P_POST.u('acc'), 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, osdT); gl.uniform1i(P_POST.u('osd'), 1);
+  gl.uniform2f(P_POST.u('res'), W, H);
+  gl.uniform1f(P_POST.u('t'), tl); gl.uniform1f(P_POST.u('S'), S);
+  gl.uniform1f(P_POST.u('flash'), 0.25 * sHit * roll);   // ループの頭もほかの場面と同じく、データモッシュで切り替わる
+  gl.uniform1f(P_POST.u('inv'), roll > 0.75 && sHit > 0.6 ? 1 : 0);   // ロールの最後は反転が明滅
+  gl.uniform1f(P_POST.u('ca'), 4 + 26 * kHit + 18 * cHit + 30 * R);   // 色のずれ（px、1080 基準）
+  gl.uniform1f(P_POST.u('slice'), Math.min(1, cHit + sHit * roll + 0.4 * roll));
+  gl.uniform1f(P_POST.u('track'), 0.3 + 0.8 * hHit + 0.7 * kHit + roll);
+  gl.uniform1ui(P_POST.u('seed'), ++frameN);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+document.getElementById('aspect').onchange = setSize; setSize();
+document.fonts.load('46px VT323');   // 画面表示の文字（書き出しは読み込みを待つ）
+vid.play();   // 位置は毎コマ frame() が合わせる
+requestAnimationFrame(frame);
+document.getElementById('play').onclick = audio;
+c.onpointerdown = audio;
+
+document.getElementById('rec').onclick = e => {
+  audio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `fold_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+</script>
+</body>
+</html>
