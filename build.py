@@ -13,7 +13,7 @@
   YouTube の URL はサムネイル→押すと再生、それ以外（Bandcamp の EmbeddedPlayer の URL など）はそのまま iframe で埋める
 - tools/index.html            … tools.tsv（名前\t英文\t遊べる URL\tGitHub の URL\t動画 URL（任意））から作る。画像は tools/<名前>.jpg を手で置く
 """
-import html, re, shutil, subprocess, sys
+import datetime, html, re, shutil, subprocess, sys
 from pathlib import Path
 
 SRC = Path(sys.argv[1] if len(sys.argv) > 1 else "../hitori_av").resolve()
@@ -67,7 +67,23 @@ def build_item(d):
         "desc": first_sentence(d / "README.md") if (d / "README.md").exists() else "",
         "en": EN.get(d.name, "").strip(),
         "live": piece.exists(),
+        "date": added(d),
     }
+
+
+def added(d):
+    """hitori_av に作品フォルダが最初に入った日（git の記録。無ければ空）"""
+    out = subprocess.run(["git", "-C", SRC, "log", "--diff-filter=A", "--format=%cs", "--", d.name], capture_output=True, text=True).stdout.split()
+    return datetime.date.fromisoformat(out[-1]).strftime("%b %-d, %Y") if out else ""
+
+
+def intro():
+    return ('<section class="intro"><p><b>veryTired</b> — Developer, not Engineer.</p>'
+            '<p>Experiments in sound and image, made with code: <a href="audiovisual/">audiovisual</a>, '
+            '<a href="music/">music</a> and <a href="tools/">tools</a>.</p>'
+            '<p><a href="https://x.com/very_tired">X</a> / <a href="https://www.instagram.com/verytired.developer/">Instagram</a> / '
+            '<a href="https://www.youtube.com/@verytired.developer">YouTube</a> / <a href="https://github.com/verytired">GitHub</a></p>'
+            '<a class="down" href="#latest">latest ↓</a></section>')
 
 
 def player(i, n):
@@ -131,7 +147,7 @@ def main():
             player(i, n)
     # トップは最新作だけ。一覧は audiovisual/ に置く
     page = (OUT / "template.html").read_text()
-    for k, v in {"HERO": f'<section class="hero">{tile(*numbered[0][::-1])}</section>', "ITEMS": "", "SUB": "latest", "ROOT": "./"}.items():
+    for k, v in {"HERO": intro() + f'<section class="latest" id="latest"><time>{numbered[0][1]["date"]}</time>{tile(*numbered[0][::-1])}</section>', "ITEMS": "", "SUB": "", "ROOT": "./"}.items():
         page = page.replace("{{%s}}" % k, v)
     (OUT / "index.html").write_text(page)
     page = (OUT / "template.html").read_text()

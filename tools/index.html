@@ -25,9 +25,17 @@
   header nav { color: var(--dim); }
   header nav a:hover, header h1 a:hover { color: var(--fg); }
   /* 1画面目: 最新作を大きく1つ。まわりは背景の縞が見える余白 */
-  .hero { min-height: calc(100svh - 48px); display: grid; place-items: center; padding: 32px 16px; }
-  .hero .tile { width: min(80vw, 64vh, 520px); }
-  .hero .cap em { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }  /* 説明は2行まで */
+  /* トップ: 1画面目は背景の縞が主役で、左上に自己紹介。スクロールすると最新作を日付付きで大きく */
+  body:has(.intro) #field { opacity: .6; }
+  .intro { min-height: calc(100svh - 48px); padding: 12vh 16px 32px; display: flex; flex-direction: column; font-size: clamp(15px, 2vw, 20px); text-shadow: 0 0 6px var(--bg), 0 0 12px var(--bg); }
+  .intro p { margin: 0 0 6px; max-width: 32em; }
+  .intro b { font-weight: normal; color: var(--accent); }
+  .intro a { text-decoration: underline; text-underline-offset: 3px; }
+  .intro .down { margin-top: auto; color: var(--dim); text-decoration: none; }
+  .latest { padding: 48px 16px 0; display: grid; justify-items: center; gap: 8px; }
+  .latest time { color: var(--dim); }
+  .latest .tile { width: min(100%, 78vh); }
+  .latest .cap em { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }  /* 説明は2行まで */
   main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .tile { display: block; background: var(--bg); transition: transform .15s ease-out; }
   .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
@@ -69,6 +77,7 @@
 const pre = document.getElementById('field'), chars = ' .·:-=+*#%@';
 const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let cols, rows, mx = -1e3, my = -1e3, ripples = [], flash = 0;
+const base = +getComputedStyle(pre).opacity;  // トップは濃く、ほかのページは薄く
 // 1文字の幅は実測する（フォントで変わる。決め打ちだと右端まで届かずカーソルともずれる）
 pre.textContent = '@'.repeat(100); const range = document.createRange(); range.selectNodeContents(pre);
 const cw = range.getBoundingClientRect().width / 100 || 7.8, ch = 13;
@@ -95,7 +104,7 @@ const draw = t => {
   }
   pre.textContent = s;
   flash *= .95;
-  pre.style.opacity = .28 + flash;  // 押した直後は明るく光る
+  pre.style.opacity = base + flash;  // 押した直後は明るく光る
   pre.style.filter = `hue-rotate(${scrollY * .3}deg)`;  // スクロールで色が回る
   if (!still) requestAnimationFrame(draw);
 };
