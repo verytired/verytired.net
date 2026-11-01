@@ -34,6 +34,8 @@
   .intro b { font-weight: normal; color: var(--accent); }
   .intro a { text-decoration: underline; text-underline-offset: 3px; }
   .intro .down { margin-top: auto; color: var(--dim); text-decoration: none; }
+  .intro a:hover, .intro a:focus-visible { background: var(--accent); color: var(--bg); text-decoration: none; text-shadow: none; outline: none; }  /* 一覧の作品番号と同じ帯 */
+  .intro .down { align-self: flex-start; }
   .latest { min-height: 100svh; padding: 48px 16px 0; display: grid; justify-items: center; align-content: start; gap: 8px; }  /* 1画面ぶんあれば、短い画面でも上端まで届いてヘッダーが出る */
   .latest time { color: var(--dim); }
   .latest .tile { width: min(100%, 78vh); }
