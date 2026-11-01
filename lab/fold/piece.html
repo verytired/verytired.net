@@ -192,10 +192,9 @@ function tex(w, h) {
   return t;
 }
 const osdT = tex();
-const hist = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, hist);   // 過去 N コマ（素材の大きさのまま）
-gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA8, 720, 1280, N);
+const hist = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, hist);   // 過去 N コマ（素材の大きさのまま。大きさは最初のコマが来てから決める：スマホ向けの軽い版は 540×960）
 gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-let head = 0;
+let head = 0, VW = 720, VH = 1280, histReady = false;
 let W, H, S, ACC = [], cur = 0;
 const osd = document.createElement('canvas'), octx = osd.getContext('2d');
 function setSize() {
@@ -229,7 +228,11 @@ function frame() {
   const stut = roll > 0 ? (roll < 0.5 ? BEAT / 2 : roll < 0.75 ? BEAT / 4 : BEAT / 8) : sc > 6 * BEAT ? BEAT / 2 : 0;
   if (stut) { const s0 = roll > 0 ? 4 * BEAT : 6 * BEAT; vt = Math.min(LOOP - 0.02, (scene + 1) * SCENE - stut + (sc - s0) % stut); }   // 場面の最後の区間をくり返す：切り替わる直前に映るのが、モッシュで引きずられるコマになる
   if (Math.abs(vid.currentTime - vt) > 0.12) vid.currentTime = vt;
-  if (vid.readyState >= 2) { head = (head + 1) % N; gl.bindTexture(gl.TEXTURE_2D_ARRAY, hist); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, head, 720, 1280, 1, gl.RGBA, gl.UNSIGNED_BYTE, vid); }
+  if (vid.readyState >= 2) {
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, hist);
+    if (!histReady) { VW = vid.videoWidth; VH = vid.videoHeight; gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA8, VW, VH, N); histReady = true; }
+    head = (head + 1) % N; gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, head, VW, VH, 1, gl.RGBA, gl.UNSIGNED_BYTE, vid);
+  }
   // キック：輪になって古いコマが混ざり、前へ押し出される。クラップ：横の帯ごとにばらばらの古さ。最後の小節：渦になって奥へ吸い込まれる
   const R = Math.max(roll, tl < 2 * BEAT ? (1 - tl / (2 * BEAT)) ** 2 : 0);   // 渦：ロールで巻き、ループの頭の2拍でほどける（継ぎ目で途切れない）
   const disp = Math.min(1, 0.2 + 0.75 * kHit + 0.6 * cHit + 0.9 * R);
@@ -238,7 +241,7 @@ function frame() {
   gl.bindFramebuffer(gl.FRAMEBUFFER, nx.f); gl.viewport(0, 0, W, H); gl.useProgram(P_FB);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY, hist); gl.uniform1i(P_FB.u('hist'), 0);
   gl.uniform1i(P_FB.u('head'), head); gl.uniform1i(P_FB.u('N'), N);
-  gl.uniform2f(P_FB.u('res'), W, H); gl.uniform2f(P_FB.u('vres'), 720, 1280);
+  gl.uniform2f(P_FB.u('res'), W, H); gl.uniform2f(P_FB.u('vres'), VW, VH);
   for (const [k, x] of Object.entries({ disp, ring, spiral, slit, t: tl, S, zoom })) gl.uniform1f(P_FB.u(k), x);
   gl.uniform1ui(P_FB.u('seed'), Math.floor(Math.max(last(tl, 'clap'), last(tl, 'snare')) * 100) >>> 0);   // 帯の古さはクラップごとに変わる
   gl.drawArrays(gl.TRIANGLES, 0, 3); cur = 1 - cur;
