@@ -124,7 +124,7 @@ def main():
         if old.name not in {d.name.split("_", 1)[1] for d in dirs}:
             shutil.rmtree(old)  # 名前を変えた・フォルダを消した場合の残骸
     items = [build_item(d) for d in dirs]
-    numbered = [(int(d.name[:3]), i) for d, i in zip(dirs, items)][::-1]  # 新しい順、番号はフォルダの通し番号（欠番があってもずらさない）
+    numbered = list(enumerate(items, 1))[::-1]  # 新しい順、番号は古い順に振る
     for n, i in numbered:
         if i["live"]:
             player(i, n)
