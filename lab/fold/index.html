@@ -43,7 +43,7 @@
 <canvas id="meter"></canvas>
 <div id="bar">
   <div id="prog"></div>
-  <a class="k" href="../../" title="Back (Esc)">←</a>
+  <a class="k" href="../../audiovisual/" title="Back (Esc)">←</a>
   <div class="t"><b>#018</b> fold <span>Four scenes of a city &quot;incident&quot; made with Veo and shot like 1996 camcorder footage, an underground ceiling caving in, an arcade crowd fleeing toward the camera, a building splitting and lifting into the sky, a lone figure in a rainy alley, cut together at 128 BPM with real datamosh (I-frames removed) smearing each scene into the next, time-displacement rings on every kick, slit-scan bands on the claps and a vortex on the closing snare roll, in the spirit of metr0punk&#x27;s analog-horror reels, all synthesized live in the browser.</span></div>
   <button id="photos" hidden>Load photos</button>
   <button id="play" title="Play / pause (Space)">▶ Play</button>
@@ -127,7 +127,7 @@ $('rec').onclick = () => {
 const key = e => {
   if (e.key === ' ') { e.preventDefault(); toggle(); }
   else if (e.key === 'r' || e.key === 'R') $('rec').click();
-  else if (e.key === 'Escape') location.href = '../../';
+  else if (e.key === 'Escape') location.href = '../../audiovisual/';
 };
 addEventListener('keydown', key);
 

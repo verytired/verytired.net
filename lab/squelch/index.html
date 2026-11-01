@@ -43,7 +43,7 @@
 <canvas id="meter"></canvas>
 <div id="bar">
   <div id="prog"></div>
-  <a class="k" href="../../" title="Back (Esc)">←</a>
+  <a class="k" href="../../audiovisual/" title="Back (Esc)">←</a>
   <div class="t"><b>#009</b> squelch <span>Hundreds of thousands of fractal-flame points spun into threads and melted by a fluid, the ground flashing black, white and neon, all driven by the filter of a 155BPM hardcore acid line.</span></div>
   <button id="photos" hidden>Load photos</button>
   <button id="play" title="Play / pause (Space)">▶ Play</button>
@@ -127,7 +127,7 @@ $('rec').onclick = () => {
 const key = e => {
   if (e.key === ' ') { e.preventDefault(); toggle(); }
   else if (e.key === 'r' || e.key === 'R') $('rec').click();
-  else if (e.key === 'Escape') location.href = '../../';
+  else if (e.key === 'Escape') location.href = '../../audiovisual/';
 };
 addEventListener('keydown', key);
 

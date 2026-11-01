@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>verytired.net</title>
+<link rel="icon" href="/favicon.svg">
+<meta name="description" content="Experiments in sound and image, made with code.">
+<style>
+  :root { --bg: #121214; --fg: #ececec; --dim: #8a8a8a; --accent: #5cc8ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+  a { color: inherit; text-decoration: none; }
+  /* 背景の文字にゆっくり流れる虹色を塗る（文字ごとに色を付けず、グラデーションを文字で切り抜く） */
+  #field { background: linear-gradient(115deg, #3d7bff, #3df2ff, #7a5cff, #d23dff, #3d7bff) 0 0 / 300% 300%;
+           -webkit-background-clip: text; background-clip: text; color: transparent; animation: psy 24s linear infinite; }
+  @keyframes psy { to { background-position: 300% 300%; } }
+  @media (prefers-reduced-motion: reduce) { #field { animation: none; } }
+  #field { position: fixed; inset: 0; margin: 0; opacity: .28; overflow: hidden; pointer-events: none; z-index: -1; line-height: 1; }
+  header { position: sticky; top: 0; z-index: 1; background: rgb(18 18 20 / .7); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+           padding: 12px 16px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 13px; margin: 0; font-weight: normal; color: var(--accent); }
+  header span { color: var(--dim); }
+  header span { margin-left: auto; }
+  header nav { color: var(--dim); }
+  header nav a:hover, header h1 a:hover { color: var(--fg); }
+  /* 1画面目: 最新作を大きく1つ。まわりは背景の縞が見える余白 */
+  .hero { min-height: calc(100svh - 48px); display: grid; place-items: center; padding: 32px 16px; }
+  .hero .tile { width: min(80vw, 64vh, 520px); }
+  .hero .cap em { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }  /* 説明は2行まで */
+  main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .tile { display: block; background: var(--bg); transition: transform .15s ease-out; }
+  .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
+  .tile:hover video, .tile:hover img { transform: scale(1.015); }
+  .cap { display: block; padding: 6px 0; }
+  .cap b { color: var(--accent); font-weight: normal; }
+  .cap i { font-style: normal; }
+  .cap em { display: block; font-style: normal; color: var(--dim); }
+  .cap em a { color: var(--accent); }
+  .cap em a:hover { text-decoration: underline; }
+  .tile:hover .cap b { background: var(--accent); color: var(--bg); }
+  footer { padding: 48px 16px 32px; color: var(--dim); }
+  footer p { margin: 0 0 4px; }
+  footer b { color: var(--fg); font-weight: normal; }
+  footer a { color: var(--accent); }
+  footer a:hover { text-decoration: underline; }
+</style>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-B7JVRP12X1"></script>
+<script>window.dataLayer = window.dataLayer || []; function gtag(){dataLayer.push(arguments);} gtag('js', new Date()); gtag('config', 'G-B7JVRP12X1');</script>
+</head>
+<body>
+<pre id="field" aria-hidden="true"></pre>
+<header>
+  <h1><a href="../">verytired.net</a></h1>
+  <nav><a href="../audiovisual/">audiovisual</a> / <a href="../music/">music</a> / <a href="../tools/">tools</a></nav>
+  <span>19 pieces · click to play live</span>
+</header>
+
+<main>
+<a class="tile" href="../lab/raster/"><video src="../lab/raster/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#019</b> <i>raster</i><em>A black-and-white face photo cut into horizontal strips, each scaled a little differently so its outline repeats in sawtooth steps, and split into vertical bands rendered in different halftones (coarse round dots, a reaction-diffusion maze, fine dots, the photo itself, binary blocks and fine diamonds), the extra zoom swelling and receding in a wave every bar to a 15-second loop of minimal glitch techno at 128 BPM, with the kick pushing the wave out and the claps reshuffling the bands, in the spirit of toan_vu_huu&#x27;s image slicer app, all synthesized live in the browser.</em></span></a>
+<a class="tile" href="../lab/fold/"><video src="../lab/fold/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#018</b> <i>fold</i><em>Four scenes of a city &quot;incident&quot; made with Veo and shot like 1996 camcorder footage, an underground ceiling caving in, an arcade crowd fleeing toward the camera, a building splitting and lifting into the sky, a lone figure in a rainy alley, cut together at 128 BPM with real datamosh (I-frames removed) smearing each scene into the next, time-displacement rings on every kick, slit-scan bands on the claps and a vortex on the closing snare roll, in the spirit of metr0punk&#x27;s analog-horror reels, all synthesized live in the browser.</em></span></a>
+<a class="tile" href="../lab/corona/"><video src="../lab/corona/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#017</b> <i>corona</i><em>About 4.2 million white GPU particles erupting like flames from the surface of a still black sphere, in monochrome, pulsing to a 15-second track of dark ambient with a 128 BPM four-on-the-floor kick, broken by inversions, RGB splits and slices on the claps, and datamoshed into blocks by the closing snare roll, all synthesized live in the browser.</em></span></a>
+<a class="tile" href="../lab/shatter/"><video src="../lab/shatter/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#016</b> <i>shatter</i><em>Low-poly rocks and triangle shards glowing blue on black, scattered and torn into blocks by a 170 BPM glitch breakbeat of metallic FM hits, rolls, granular stutters and fills, all synthesized live in the browser (playable with a KORG nanoKONTROL2).</em></span></a>
+<a class="tile" href="../lab/idolwerk/"><video src="../lab/idolwerk/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#015</b> <i>idolwerk</i><em>A fake MV for an idol group that doesn&#x27;t exist, the four late-1970s Kraftwerk members recast as four Japanese women, built on the look of &quot;The Robots&quot;: red shirts, black ties and stiff synchronized moves, with hyperpop glitches on top and a robot-voiced 808 electro track that turns hyperpop in the chorus.</em></span></a>
+<a class="tile" href="../lab/vector/"><video src="../lab/vector/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#014</b> <i>vector</i><em>A triangle-mesh head glowing white like a vector monitor, in the spirit of the CG heads of Kraftwerk&#x27;s &quot;Electric Café&quot;, switching its angle, layout and 3D lettering on every beat to melodyless 808 electro and robot voices.</em></span></a>
+<a class="tile" href="../lab/bluescreen/"><video src="../lab/bluescreen/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#013</b> <i>bluescreen</i><em>A fake music video for a nonexistent hyperpop singer, with an AI-made gabber-hyperpop song: lip-synced screaming, frozen error windows, a dead battery and a blue screen.</em></span></a>
+<a class="tile" href="../lab/screensaver/"><video src="../lab/screensaver/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#012</b> <i>screensaver</i><em>Five AI clips that look like late-90s CGI screensavers, dissolving one per bar to a music-box and pad tune, smeared through VHS and torn as if the tape skips at every cut.</em></span></a>
+<a class="tile" href="../lab/sugarrush/"><video src="../lab/sugarrush/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#011</b> <i>sugarrush</i><em>A fake hyperpop MV for a K-pop four-piece that doesn&#x27;t exist, one member cut out and multiplied over false color, bouncing letters, stickers and glitches.</em></span></a>
+<a class="tile" href="../lab/ghostidol/"><video src="../lab/ghostidol/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#010</b> <i>ghostidol</i><em>A fake MV for a K-pop girl group that doesn&#x27;t exist, torn apart to gabber with VHS glitches, datamoshing, melting faces and fake karaoke lyrics.</em></span></a>
+<a class="tile" href="../lab/squelch/"><video src="../lab/squelch/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#009</b> <i>squelch</i><em>Hundreds of thousands of fractal-flame points spun into threads and melted by a fluid, the ground flashing black, white and neon, all driven by the filter of a 155BPM hardcore acid line.</em></span></a>
+<a class="tile" href="../lab/slowdive/"><video src="../lab/slowdive/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#008</b> <i>slowdive</i><em>An AI video of a 10m platform dive slowed right down under VHS glitches — shifted lines, bleeding color, split RGB — with a mode that turns every frame into dots.</em></span></a>
+<a class="tile" href="../lab/modlines/"><video src="../lab/modlines/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#007</b> <i>modlines</i><em>Black-and-white photos rebuilt as coarse dither or brightness-driven wavy lines in a four-color palette, moved by tape wobble and kicks.</em></span></a>
+<a class="tile" href="../lab/meltdown/"><video src="../lab/meltdown/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#006</b> <i>meltdown</i><em>Its own source code, syntax-highlighted and melted into swirls and streaks by a displacement field, then dissolved into dots.</em></span></a>
+<a class="tile" href="../lab/ascii_scan/"><video src="../lab/ascii_scan/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#005</b> <i>ascii_scan</i><em>A woman&#x27;s face and a 3D point cloud turned into ASCII characters, traced by a scanline that leaves color behind.</em></span></a>
+<a class="tile" href="../lab/ascii/"><video src="../lab/ascii/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#004</b> <i>ascii</i><em>A black-and-white portrait rebuilt as a grid of characters, glitch sounds driving density, line shifts and color offsets.</em></span></a>
+<a class="tile" href="../lab/kaleido/"><video src="../lab/kaleido/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#003</b> <i>kaleido</i><em>AI-generated photos folded into a kaleidoscope, with brightness, repetition, layering and cuts driven by sound.</em></span></a>
+<a class="tile" href="../lab/scanner/"><video src="../lab/scanner/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#002</b> <i>scanner</i><em>A white point cloud reshapes with the sound, the camera cutting on every kick and snare.</em></span></a>
+<a class="tile" href="../lab/strobe/"><video src="../lab/strobe/loop.mp4" muted loop playsinline preload="none"></video><span class="cap"><b>#001</b> <i>strobe</i><em>Turns a bundle of photos into a strobe-style video.</em></span></a>
+</main>
+<footer>
+  <p><b>veryTired</b></p>
+  <p>Developer, not Engineer. —— code / sound / image / notes. father.</p>
+  <p><a href="https://x.com/very_tired">X</a> / <a href="https://www.instagram.com/verytired.developer/">Instagram</a> / <a href="https://www.youtube.com/@verytired.developer">YouTube</a> / <a href="https://github.com/verytired">GitHub</a></p>
+</footer>
+<script>
+// 背景: 文字で描く干渉縞（ertdfgcvb 風）。カーソルのまわりが渦を巻き、押すと波紋が広がり、スクロールで縞が流れる。動きを減らす設定なら止める
+const pre = document.getElementById('field'), chars = ' .·:-=+*#%@';
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let cols, rows, mx = -1e3, my = -1e3, ripples = [], flash = 0;
+// 1文字の幅は実測する（フォントで変わる。決め打ちだと右端まで届かずカーソルともずれる）
+pre.textContent = '@'.repeat(100); const range = document.createRange(); range.selectNodeContents(pre);
+const cw = range.getBoundingClientRect().width / 100 || 7.8, ch = 13;
+const resize = () => { cols = Math.ceil(innerWidth / cw); rows = Math.ceil(innerHeight / ch); };
+addEventListener('resize', resize); resize();
+addEventListener('pointermove', e => { mx = e.clientX / cw; my = e.clientY / ch; });
+addEventListener('pointerdown', e => { ripples.push({ x: e.clientX / cw, y: e.clientY / ch, t: performance.now() }); ripples = ripples.slice(-6); flash = .5; });
+const draw = t => {
+  const sy = scrollY * .01;
+  ripples = ripples.filter(r => t - r.t < 2500);
+  let s = '';
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      let v = Math.sin(x * .09 + t * .0007 + sy) + Math.sin(y * .17 - t * .0005 - sy * 2) + Math.sin(Math.hypot(x - cols / 2, (y - rows / 2) * 2) * .12 - t * .001);
+      const d = Math.hypot(x - mx, (y - my) * 2);
+      v += Math.exp(-d / 20) * 3 * (1 + Math.sin(d * .4 - t * .008));  // カーソルのまわりが明るく脈打つ
+      for (const r of ripples) {
+        const a = (t - r.t) / 2500, e = Math.hypot(x - r.x, (y - r.y) * 2) - a * 120;
+        v += Math.exp(-e * e / 6) * 5 * (1 - a);  // 波紋の輪
+      }
+      s += chars[Math.max(0, Math.min(chars.length - 1, Math.floor((v + 3) / 6 * chars.length)))];
+    }
+    s += '\n';
+  }
+  pre.textContent = s;
+  flash *= .95;
+  pre.style.opacity = .28 + flash;  // 押した直後は明るく光る
+  pre.style.filter = `hue-rotate(${scrollY * .3}deg)`;  // スクロールで色が回る
+  if (!still) requestAnimationFrame(draw);
+};
+requestAnimationFrame(draw);
+
+// タイルがカーソルの方へ傾く（マウスのときだけ）
+if (!still && matchMedia('(hover: hover)').matches) document.querySelectorAll('.tile').forEach(t => {
+  t.addEventListener('pointermove', e => {
+    const r = t.getBoundingClientRect(), x = (e.clientX - r.left) / r.width - .5, y = (e.clientY - r.top) / r.height - .5;
+    t.style.transform = `perspective(500px) rotateX(${-y * 30}deg) rotateY(${x * 30}deg)`;
+  });
+  t.addEventListener('pointerleave', () => t.style.transform = '');
+});
+
+// 見えている動画だけ再生する
+const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? e.target.play().catch(() => {}) : e.target.pause()));
+document.querySelectorAll('video').forEach(v => io.observe(v));
+
+// YouTube はサムネイルだけ出し、押したらその場で再生する
+document.querySelectorAll('[data-yt]').forEach(a => a.addEventListener('click', e => {
+  e.preventDefault();
+  a.querySelector('img').outerHTML = `<iframe src="https://www.youtube-nocookie.com/embed/${a.dataset.yt}?autoplay=1" allow="autoplay; encrypted-media; fullscreen" allowfullscreen></iframe>`;
+}, { once: true }));
+</script>
+</body>
+</html>

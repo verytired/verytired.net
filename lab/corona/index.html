@@ -43,7 +43,7 @@
 <canvas id="meter"></canvas>
 <div id="bar">
   <div id="prog"></div>
-  <a class="k" href="../../" title="Back (Esc)">←</a>
+  <a class="k" href="../../audiovisual/" title="Back (Esc)">←</a>
   <div class="t"><b>#017</b> corona <span>About 4.2 million white GPU particles erupting like flames from the surface of a still black sphere, in monochrome, pulsing to a 15-second track of dark ambient with a 128 BPM four-on-the-floor kick, broken by inversions, RGB splits and slices on the claps, and datamoshed into blocks by the closing snare roll, all synthesized live in the browser.</span></div>
   <button id="photos" hidden>Load photos</button>
   <button id="play" title="Play / pause (Space)">▶ Play</button>
@@ -127,7 +127,7 @@ $('rec').onclick = () => {
 const key = e => {
   if (e.key === ' ') { e.preventDefault(); toggle(); }
   else if (e.key === 'r' || e.key === 'R') $('rec').click();
-  else if (e.key === 'Escape') location.href = '../../';
+  else if (e.key === 'Escape') location.href = '../../audiovisual/';
 };
 addEventListener('keydown', key);
 

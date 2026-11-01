@@ -7,7 +7,8 @@
 - lab/<名前>/src/       … 作品が読む素材（src="…" に書いてある mp4 だけ。名前を組み立てて読む作品はフォルダごと）
 - lab/<名前>/**.sp.mp4  … 素材の動画のスマホ向けの軽い版（540px 幅・無音）
 - lab/<名前>/loop.mp4     … 1:1 版の mp4 から作る無音・480px・8秒のループ（元の mp4 はサイトに入れない）
-- index.html                  … template.html の {{ITEMS}} を埋める
+- index.html                  … 最新作だけを大きく出すトップ（template.html の {{HERO}}）
+- audiovisual/index.html      … 全作品の一覧（template.html の {{ITEMS}}）
 - music/index.html            … music.tsv（曲名\tURL、上から並ぶ）から同じ template.html で作る
   YouTube の URL はサムネイル→押すと再生、それ以外（Bandcamp の EmbeddedPlayer の URL など）はそのまま iframe で埋める
 - tools/index.html            … tools.tsv（名前\t英文\t遊べる URL\tGitHub の URL\t動画 URL（任意））から作る。画像は tools/<名前>.jpg を手で置く
@@ -76,10 +77,10 @@ def player(i, n):
     (LAB / i["name"] / "index.html").write_text(page)
 
 
-def tile(i, n):
-    href = f"lab/{i['name']}/" if i["live"] else f"lab/{i['name']}/loop.mp4"
+def tile(i, n, root=""):
+    href = f"{root}lab/{i['name']}/" if i["live"] else f"{root}lab/{i['name']}/loop.mp4"
     return (f'<a class="tile" href="{href}">'
-            f'<video src="lab/{i["name"]}/loop.mp4" muted loop playsinline preload="none"></video>'
+            f'<video src="{root}lab/{i["name"]}/loop.mp4" muted loop playsinline preload="none"></video>'
             f'<span class="cap"><b>#{n:03d}</b> <i>{html.escape(i["name"])}</i>'
             f'<em>{html.escape(i["en"] or i["desc"])}</em></span></a>')
 
@@ -128,11 +129,16 @@ def main():
     for n, i in numbered:
         if i["live"]:
             player(i, n)
+    # トップは最新作だけ。一覧は audiovisual/ に置く
     page = (OUT / "template.html").read_text()
-    page = page.replace("{{HERO}}", f'<section class="hero">{tile(*numbered[0][::-1])}</section>')  # 最新作を1画面目に大きく
-    page = page.replace("{{ITEMS}}", "\n".join(tile(i, n) for n, i in numbered))
-    page = page.replace("{{SUB}}", f"{len(items)} pieces · click to play live").replace("{{ROOT}}", "./")
+    for k, v in {"HERO": f'<section class="hero">{tile(*numbered[0][::-1])}</section>', "ITEMS": "", "SUB": "latest", "ROOT": "./"}.items():
+        page = page.replace("{{%s}}" % k, v)
     (OUT / "index.html").write_text(page)
+    page = (OUT / "template.html").read_text()
+    for k, v in {"HERO": "", "ITEMS": "\n".join(tile(i, n, "../") for n, i in numbered), "SUB": f"{len(items)} pieces · click to play live", "ROOT": "../"}.items():
+        page = page.replace("{{%s}}" % k, v)
+    (OUT / "audiovisual").mkdir(exist_ok=True)
+    (OUT / "audiovisual" / "index.html").write_text(page)
     music()
     tools()
     print(f"{len(items)} items -> index.html")

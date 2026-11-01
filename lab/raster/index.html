@@ -43,7 +43,7 @@
 <canvas id="meter"></canvas>
 <div id="bar">
   <div id="prog"></div>
-  <a class="k" href="../../" title="Back (Esc)">←</a>
+  <a class="k" href="../../audiovisual/" title="Back (Esc)">←</a>
   <div class="t"><b>#019</b> raster <span>A black-and-white face photo cut into horizontal strips, each scaled a little differently so its outline repeats in sawtooth steps, and split into vertical bands rendered in different halftones (coarse round dots, a reaction-diffusion maze, fine dots, the photo itself, binary blocks and fine diamonds), the extra zoom swelling and receding in a wave every bar to a 15-second loop of minimal glitch techno at 128 BPM, with the kick pushing the wave out and the claps reshuffling the bands, in the spirit of toan_vu_huu&#x27;s image slicer app, all synthesized live in the browser.</span></div>
   <button id="photos" hidden>Load photos</button>
   <button id="play" title="Play / pause (Space)">▶ Play</button>
@@ -127,7 +127,7 @@ $('rec').onclick = () => {
 const key = e => {
   if (e.key === ' ') { e.preventDefault(); toggle(); }
   else if (e.key === 'r' || e.key === 'R') $('rec').click();
-  else if (e.key === 'Escape') location.href = '../../';
+  else if (e.key === 'Escape') location.href = '../../audiovisual/';
 };
 addEventListener('keydown', key);
 
