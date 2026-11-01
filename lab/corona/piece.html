@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Corona</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="fps" style="position:fixed;right:8px;top:8px;color:#0f0;font:12px monospace"></div>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="15"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+
+<script>
+// 黒い球（ボイド）の縁から白い粒子の筋が噴き出す。15秒を3.75秒×4の「呼吸」に分け、
+// 頭のキックで吐く（粒子が外へ噴き出す）、後半のノイズの立ち上がりで吸う（外から球へ吸い込まれる）
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+const LOOP = 15, CYC = LOOP / 2, BEAT = CYC / 16, N = 200000;   // 和音ひとつが CYC
+
+// ---- 譜面：音も映像もここから読む ----
+let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const EV = [];   // 暗いアンビエント：15秒で2つの和音。頭で遠い低い響き、あとは火の粉がまばらに
+const CHORDS = [[38, 45, 50, 53, 57], [34, 41, 46, 50, 53]];   // MIDI：D の短調（Dm add9）→ B♭（maj7 寄り）。低い所に寄せて暗く
+for (let k = 0; k < 2; k++) {
+  const T = k * LOOP / 2;
+  EV.push({ t: T, type: 'big' }, { t: T, type: 'pad', c: k });
+  EV.push({ t: T + 4.5, type: 'inhale' });
+  // ビート（128 BPM、和音ひとつに16拍＝4小節）：4つ打ちのキック、小節の頭は強め、裏に小さなハット
+  for (let b = 1; b < 16; b++) EV.push({ t: T + b * BEAT, type: 'small', v: b % 4 === 0 ? 0.85 : 0.55 });
+  for (let b = 0; b < 16; b++) EV.push({ t: T + (b + 0.5) * BEAT, type: 'hat', v: b % 2 ? 1 : 0.6 });
+  for (let b = 1; b < 16; b += 2) if (!(k === 1 && b >= 13)) EV.push({ t: T + b * BEAT, type: 'clap' });   // 2拍目と4拍目にクラップ
+  if (k === 1) for (let x = 12 * BEAT, i = 0; x < CYC - 0.01; i++) { EV.push({ t: T + x, type: 'snare', v: i }); x += x < 14 * BEAT ? BEAT / 2 : x < 15 * BEAT ? BEAT / 4 : BEAT / 8; }   // 最後の小節はスネアのロールで頭へ戻る
+  for (let s = 0; s < 6; s++) if (rnd() < 0.6) EV.push({ t: T + 0.8 + rnd() * 6, type: 'crackle', v: rnd() });
+}
+EV.sort((a, b) => a.t - b.t);
+const last = (tl, type) => { let x = -99; for (const e of EV) { if (e.t > tl) break; if (e.type === type) x = e.t; } return x; };
+
+// ---- 音 ----
+let ac = null, t0 = 0, out, noiseBuf, nextEv = 0, loopN = 0;
+let verb;
+function audio() {
+  if (ac) return;
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -18; comp.ratio.value = 3;
+  out = ac.createGain(); out.gain.value = 0.7; out.connect(comp); comp.connect(ac.destination);
+  window.audioDest = ac.createMediaStreamDestination ? ac.createMediaStreamDestination() : null;
+  if (audioDest) comp.connect(audioDest);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  // 残響：6秒で消えるノイズを畳み込む（ステレオ）
+  const L = ac.sampleRate * 6, ir = ac.createBuffer(2, L, ac.sampleRate);
+  for (let ch = 0; ch < 2; ch++) { const x = ir.getChannelData(ch); for (let i = 0; i < L; i++) x[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / L, 3); }
+  verb = ac.createConvolver(); verb.buffer = ir; const vg = ac.createGain(); vg.gain.value = 0.9; verb.connect(vg); vg.connect(out);
+  // 底でずっと鳴る低い唸り：ゆっくりふくらんで、しぼむ
+  const drone = ac.createGain(); drone.gain.value = 0.1; drone.connect(out);
+  const lfo = ac.createOscillator(), lg = ac.createGain(); lfo.frequency.value = 1 / 7.5; lg.gain.value = 0.05; lfo.connect(lg); lg.connect(drone.gain); lfo.start();
+  [36.7, 36.95, 55.1].forEach(f => { const o = ac.createOscillator(); o.frequency.value = f; o.connect(drone); o.start(); });
+  // 風：低い所だけ通したノイズ。こもり具合がゆっくり動く
+  const wn = noise(ac.currentTime, 1e5), wf = ac.createBiquadFilter(), wg = ac.createGain();
+  wf.type = 'lowpass'; wf.Q.value = 4; wf.frequency.value = 260; wg.gain.value = 0.22;
+  const wl = ac.createOscillator(), wlg = ac.createGain(); wl.frequency.value = 1 / 15; wlg.gain.value = 160; wl.connect(wlg); wlg.connect(wf.frequency); wl.start();
+  wn.connect(wf); wf.connect(wg); wg.connect(out); wg.connect(verb);
+  t0 = ac.currentTime + 0.05;
+  setInterval(schedule, 25); schedule();
+}
+function noise(t, len) { const n = ac.createBufferSource(); n.buffer = noiseBuf; n.loop = true; n.start(t, Math.random()); n.stop(t + len); return n; }
+function boom(t) {   // 遠い低い響き：歪ませず、ゆっくり消える
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(70, t); o.frequency.exponentialRampToValueAtTime(32, t + 1.5);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5, t + 0.08); g.gain.exponentialRampToValueAtTime(0.001, t + 4);
+  o.connect(g); g.connect(out); g.connect(verb); o.start(t); o.stop(t + 4.1);
+}
+function kick(t, v) {   // こもった柔らかいキック：歪ませず、低い所だけ。少し残響へ
+  const o = ac.createOscillator(), g = ac.createGain(), f = ac.createBiquadFilter(), sv = ac.createGain();
+  f.type = 'lowpass'; f.frequency.value = 280;
+  o.frequency.setValueAtTime(95, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.18);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.9 * v, t + 0.012); g.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+  sv.gain.value = 0.25; o.connect(f); f.connect(g); g.connect(out); g.connect(sv); sv.connect(verb); o.start(t); o.stop(t + 0.75);
+}
+function hat(t, v) {   // 小さなハット：短く、少し残響へ
+  const n = noise(t, 0.04), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'highpass'; f.frequency.value = 7000; g.gain.setValueAtTime(0.06 * v, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.035);
+  n.connect(f); f.connect(g); g.connect(out); g.connect(verb);
+}
+function clap(t) {   // クラップ：ずらした短いノイズ3つ＋残り。大きな残響へ送って暗い空間に響かせる
+  const f = ac.createBiquadFilter(), g = ac.createGain(); f.type = 'bandpass'; f.frequency.value = 1300; f.Q.value = 1.2;
+  [0, 0.011, 0.023].forEach(d => { const n = noise(t + d, 0.012); n.connect(f); });
+  const tail = noise(t + 0.03, 0.18), tg = ac.createGain(); tg.gain.setValueAtTime(0.5, t + 0.03); tg.gain.exponentialRampToValueAtTime(0.001, t + 0.2); tail.connect(tg); tg.connect(f);
+  g.gain.value = 0.32; f.connect(g); g.connect(out); g.connect(verb);
+}
+function snare(t, i) {   // ロール：だんだん細かく・大きく
+  const n = noise(t, 0.12), f = ac.createBiquadFilter(), g = ac.createGain(), pk = 0.08 + Math.min(i, 20) * 0.012;
+  f.type = 'bandpass'; f.frequency.value = 1400 + i * 60; f.Q.value = 1;
+  g.gain.setValueAtTime(pk, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+  n.connect(f); f.connect(g); g.connect(out); g.connect(verb);
+}
+function pad(t, notes) {   // 暗いパッド：少しずらしたノコギリ2本ずつを、こもらせてゆっくり立ち上げ、次の和音と重ねて消す
+  const len = LOOP / 2 + 3, f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'lowpass'; f.Q.value = 2; f.frequency.setValueAtTime(250, t); f.frequency.linearRampToValueAtTime(900, t + len * 0.45); f.frequency.linearRampToValueAtTime(300, t + len);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.07, t + 3); g.gain.setValueAtTime(0.07, t + len - 3); g.gain.linearRampToValueAtTime(0.0001, t + len);
+  for (const m of notes) for (const dt of [-6, 6]) { const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 440 * 2 ** ((m - 69) / 12); o.detune.value = dt; o.connect(f); o.start(t); o.stop(t + len); }
+  f.connect(g); g.connect(out); g.connect(verb);
+}
+function breathIn(t, len) { // 次の和音へ向けて、低いノイズがゆっくり息を吸うように上がる
+  const n = noise(t, len), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.Q.value = 3; f.frequency.setValueAtTime(150, t); f.frequency.exponentialRampToValueAtTime(1200, t + len);
+  g.gain.setValueAtTime(0.001, t); g.gain.exponentialRampToValueAtTime(0.12, t + len - 0.1); g.gain.linearRampToValueAtTime(0, t + len);
+  n.connect(f); f.connect(g); g.connect(verb);
+}
+function crackle(t, v) {   // 火の粉：小さく、残響の中で鳴る
+  const n = noise(t, 0.008), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'highpass'; f.frequency.value = 3000 + v * 6000; g.gain.value = 0.05 + v * 0.08;
+  n.connect(f); f.connect(g); g.connect(verb);
+}
+function schedule() {
+  const ahead = ac.currentTime + 0.15;
+  for (;;) {
+    const e = EV[nextEv], t = t0 + loopN * LOOP + e.t;
+    if (t > ahead) break;
+    if (t >= ac.currentTime - 0.01) {
+      if (e.type === 'big') { boom(t); kick(t, 1); }
+      else if (e.type === 'small') kick(t, e.v);
+      else if (e.type === 'hat') hat(t, e.v);
+      else if (e.type === 'clap') clap(t);
+      else if (e.type === 'snare') snare(t, e.v);
+      else if (e.type === 'pad') pad(t, CHORDS[e.c]);
+      else if (e.type === 'inhale') breathIn(t, LOOP / 2 - 4.5);
+      else crackle(t, e.v);
+    }
+    if (++nextEv === EV.length) { nextEv = 0; loopN++; }
+  }
+}
+
+// ---- GPU（WebGL2）の粒子 ----
+// 粒子の状態は浮動小数のテクスチャ（TEX×TEX 個）。A：位置 xyz と年齢、B：寿命と速さ。毎コマ、シェーダーで次の状態を書く
+const TEX = 2048;   // 2048² ≈ 420万個
+const BRIGHT = 0.4;   // 1粒の明るさ
+const FX = true;   // 音に合わせる演出（反転・RGB のずれ・スライス・ズーム・寄り）。いまは見た目だけ合わせるので切っておく
+const FB = { zoom: 0, warp: 0, decay: 0, inKeep: 1 };   // 試し：フィードバックを切る   // フィードバック：1コマの拡大・ゆがみ・外の残り方・球の中の残り方
+const glc = document.createElement('canvas'), gl = glc.getContext('webgl2', { antialias: false, premultipliedAlpha: false });
+gl.getExtension('EXT_color_buffer_float');
+const GLSL_COMMON = `#version 300 es
+precision highp float; precision highp int;
+#define TEX ${TEX}
+uint pcg(uint v) { uint s = v * 747796405u + 2891336453u; uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+float h1(inout uint s) { s = pcg(s); return float(s) / 4294967295.; }
+vec3 mod289(vec3 x) { return x - floor(x * (1. / 289.)) * 289.; }
+vec4 mod289(vec4 x) { return x - floor(x * (1. / 289.)) * 289.; }
+vec4 permute(vec4 x) { return mod289(((x * 34.) + 1.) * x); }
+float snoise(vec3 v) {   // 3D simplex ノイズ（Ashima）
+  const vec2 C = vec2(1. / 6., 1. / 3.); const vec4 D = vec4(0., .5, 1., 2.);
+  vec3 i = floor(v + dot(v, C.yyy)), x0 = v - i + dot(i, C.xxx);
+  vec3 g = step(x0.yzx, x0.xyz), l = 1. - g, i1 = min(g.xyz, l.zxy), i2 = max(g.xyz, l.zxy);
+  vec3 x1 = x0 - i1 + C.xxx, x2 = x0 - i2 + C.yyy, x3 = x0 - D.yyy;
+  i = mod289(i);
+  vec4 p = permute(permute(permute(i.z + vec4(0., i1.z, i2.z, 1.)) + i.y + vec4(0., i1.y, i2.y, 1.)) + i.x + vec4(0., i1.x, i2.x, 1.));
+  vec3 ns = .142857142857 * D.wyz - D.xzx;
+  vec4 j = p - 49. * floor(p * ns.z * ns.z), x_ = floor(j * ns.z), y_ = floor(j - 7. * x_);
+  vec4 x = x_ * ns.x + ns.yyyy, y = y_ * ns.x + ns.yyyy, h = 1. - abs(x) - abs(y);
+  vec4 b0 = vec4(x.xy, y.xy), b1 = vec4(x.zw, y.zw), s0 = floor(b0) * 2. + 1., s1 = floor(b1) * 2. + 1., sh = -step(h, vec4(0.));
+  vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy, a1 = b1.xzyw + s1.xzyw * sh.zzww;
+  vec3 p0 = vec3(a0.xy, h.x), p1 = vec3(a0.zw, h.y), p2 = vec3(a1.xy, h.z), p3 = vec3(a1.zw, h.w);
+  vec4 nm = 1.79284291400159 - .85373472095314 * vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3));
+  p0 *= nm.x; p1 *= nm.y; p2 *= nm.z; p3 *= nm.w;
+  vec4 m = max(.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.); m = m * m;
+  return 42. * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+}
+// 地殻の割れ目（目には見えない粒子の出口）：ノイズが 0 になる線（リッジ）。セルの網目にならない、うねった曲線になる。
+// 別のノイズで途切れさせて、つながった網目に見えないようにする。1 が割れ目の真ん中
+float crack(vec3 d, float w) {
+  vec3 p = d * 1.8 + .3 * vec3(snoise(d * 3.), snoise(d * 3. + 7.), snoise(d * 3. + 13.));
+  return (1. - smoothstep(0., w * 1.5, abs(snoise(p)))) * smoothstep(-.3, .3, snoise(d * 2.7 + 5.));
+}
+`;
+const UPDATE_FS = GLSL_COMMON + `
+uniform sampler2D A, B; uniform float dt, nz, flow, radial, jetV, hotT, hotJump, burst, flSum; uniform uint seed; uniform int init;
+uniform vec4 fl[4];   // 噴き上げ：xyz が場所（表面の向き）、w が強さ
+layout(location = 0) out vec4 oA; layout(location = 1) out vec4 oB;
+vec3 pot(vec3 p, float t) { return vec3(snoise(p + vec3(0, t, 0)), snoise(p + vec3(31.4, 0, -t)), snoise(p + vec3(-t, 17.7, 0))); }
+vec3 curl(vec3 p, float t) {   // 3本のノイズをベクトルポテンシャルにした curl：渦を巻くが湧き出しのない流れ
+  const float e = .04; vec3 dx = vec3(e, 0, 0), dy = vec3(0, e, 0), dz = vec3(0, 0, e);
+  vec3 x0 = pot(p - dx, t), x1 = pot(p + dx, t), y0 = pot(p - dy, t), y1 = pot(p + dy, t), z0 = pot(p - dz, t), z1 = pot(p + dz, t);
+  return vec3((y1.z - y0.z) - (z1.y - z0.y), (z1.x - z0.x) - (x1.z - x0.z), (x1.y - x0.y) - (y1.x - y0.x)) / (2. * e);
+}
+// 生まれる点は表面の決まった3000か所。熱いところ（ノイズ）ほど生まれやすい
+uniform float crackW;
+vec3 emit(inout uint s, out float h) {
+  for (int k = 0; k < 24; k++) {
+    uint se = uint(h1(s) * 20000.) * 9781u + 17u;
+    float z = h1(se) * 2. - 1., a = h1(se) * 6.2831853, q = sqrt(1. - z * z);
+    vec3 d = normalize(vec3(cos(a) * q, sin(a) * q, z) + (vec3(h1(s), h1(s), h1(s)) - .5) * .006);
+    h = clamp(snoise(d * 2.2 + vec3(hotJump, hotT, 0.)) * 1.6 - .15, 0., 1.);   // 熱いところを絞って、粒子を塊に集める
+    if (h1(s) < crack(d, crackW) * (.25 + .75 * h)) return d;   // ひびの上だけ。熱いところほど多い
+  }
+  h = 0.; return vec3(0, 0, 1);
+}
+void main() {
+  // 膜を表面から出し続ける：各粒子は球の表面に決まった「ふるさと」（ID から決まる点）を持ち、寿命が来たら必ずそこへ戻る。
+  // 寿命は粒子ごとにずらすので、毎コマ薄い殻が1枚ずつ生まれ、層になって外へ押し出される。
+  // 噴き上げる場所（表面の2〜3割）だけ殻が速く押し出されて積み重なり、塊になる。ほかは表面に貼りついたまま
+  ivec2 ip = ivec2(gl_FragCoord.xy); uint id = uint(ip.y * TEX + ip.x), s = pcg(id + 1u);
+  float zz = 1. - 2. * (float(id) + .5) / float(TEX * TEX), lon = float(id) * 2.39996323, qq = sqrt(1. - zz * zz);
+  vec3 home = vec3(qq * cos(lon), zz, qq * sin(lon));   // ふるさと（フィボナッチらせん）
+  // 試し：規則正しい格子の点（同心の殻 8 枚）を、なめらかなノイズでそのまま押しずらす（curl ではないので、点が寄る所は白い塊、離れる所は黒い穴、折れる所は明るい筋になる）
+  uint li = id % 524288u; float sh = float(id / 524288u), la = (float(li / 1024u) + .5) / 512. * 3.14159265, lo = (float(li % 1024u) + .5) / 1024. * 6.2831853;   // 殻 1 枚に 1024（経度）×512（緯度）の格子
+  float cz = 1. - 2. * la / 3.14159265, sz = sqrt(1. - cz * cz); home = vec3(sz * cos(lo), cz, sz * sin(lo));
+  // フレア：表面の数か所だけ、殻を大きく持ち上げて広げる（点が寄って白く飛ぶ塊になる）。ほかは表面に貼りついたまま
+  vec3 fo = vec3(0, 0, nz * .5); float f0 = snoise(home * 1.3 + fo); const float e = .02;
+  vec3 g = vec3(snoise((home + vec3(e, 0, 0)) * 1.3 + fo), snoise((home + vec3(0, e, 0)) * 1.3 + fo), snoise((home + vec3(0, 0, e)) * 1.3 + fo)) - f0;
+  g = (g - home * dot(g, home)) / e;   // 表面に沿ったノイズの坂
+  vec3 hm = normalize(home + g * .12);   // 点を坂の上へ寄せる：山に点が集まって濃い塊、谷は空いて黒くなる
+  float m = smoothstep(-.25, .5, snoise(hm * 1.3 + fo));   // 噴き上げる場所を広く（縁のほぼ全周から出る）
+  // 軌道：殻ごとに表面の格子から生まれ、毎コマ「外へ上る速さ＋ノイズの流れ」で前のコマの続きから進む。寿命（約4秒）で表面に戻る
+  float ph = fract(sh / 8. + .6 * snoise(home * 1.7 + vec3(sh * 3.1, 0, 0)) + nz * 3.);   // 生まれる時刻は近くの点どうしでそろえ、場所ごとになめらかにずらす：膜が生まれて流れで折れ、網目やレースの筋になる   // 生まれる時刻は1粒ずつばらす：表面から絶えず出て、同じ場所の粒子は同じ流れに乗り、つながった1つの炎になる
+  vec4 a = texelFetch(A, ip, 0), b = texelFetch(B, ip, 0); vec3 p = a.xyz;
+  if (init == 1 || ph < a.w) {   // 生まれる：表面の格子の点を、細かいしわの分だけずらした所
+    vec3 k = hm * 1.5;
+    p = hm * 1.002 + (.03 + .06 * m) * vec3(snoise(k * 4. + vec3(0, 0, nz)), snoise(k * 4. + vec3(17, 0, nz)), snoise(k * 4. + vec3(31, 0, nz)));
+    b.z = m; b.w = pow(clamp(.5 + .7 * snoise(hm * .8 + vec3(9, 0, nz * .3)), 0., 1.), 2.);   // 炎の大きさ：大きな炎は数か所だけ、ほかは小さい（大きさをそろえない）
+  }
+  float mm = b.z, fs = b.w, r = length(p); vec3 n = p / r, q = p * 1.6 - n * nz * 2.;   // 流れの模様も外へ流す
+  vec3 w = vec3(snoise(q + vec3(0, 0, nz)), snoise(q + vec3(17, 0, nz)), snoise(q + vec3(31, 0, nz)))
+         + .6 * vec3(snoise(q * 5. + vec3(0, 0, nz)), snoise(q * 5. + vec3(17, 0, nz)), snoise(q * 5. + vec3(31, 0, nz)));   // 細かい流れを強く：膜が細かく折れて縮れた筋になる   // curl ではない流れ：点が寄って塊になる
+  float hgt = clamp((r - 1.) * 3., 0., 1.);   // 表面からの高さ（0：根元 → 1：先）
+  float sp = (.06 + .25 * smoothstep(-.4, .8, snoise(q * .7 + vec3(5, 0, nz * .5)))) * (.8 + .4 * h1(s)) * (1. + 1. * hgt) * (.35 + .9 * fs);   // 上る速さ：場所ごとに違い、上るほど加速する（炎が引き伸ばされて細い舌になる）
+  vec3 tq = q * 2.5 + vec3(0, 0, nz * 10.);   // 先のちらつき：速く変わる細かい流れ
+  vec3 tw = vec3(snoise(tq), snoise(tq + 17.), snoise(tq + 31.));
+  const float e2 = .03; float c0 = snoise(p * 3. + vec3(0, 0, nz));   // 舌の中心（ノイズの山）へ横から寄せて、先を細らせる
+  vec3 cg = vec3(snoise((p + vec3(e2, 0, 0)) * 3. + vec3(0, 0, nz)), snoise((p + vec3(0, e2, 0)) * 3. + vec3(0, 0, nz)), snoise((p + vec3(0, 0, e2)) * 3. + vec3(0, 0, nz))) - c0;
+  cg = (cg - n * dot(cg, n)) / e2;
+  vec3 lat = (w - n * dot(w, n)) * (.12 + .6 * hgt) + (tw - n * dot(tw, n)) * .22 * hgt;   // 横へのうねり（速くしたぶん強めないと、曲がる前に外へ抜けて直線になる）   // 根元は静か、上るほど横へ広がってもくもくした塊になり、先が少し乱れる（先を細らせるのはやめた）
+  vec3 v = n * mm * sp + lat * mm;
+  p += v * dt * 3.5 * (1. + .8 * burst); r = length(p);   // キックで一瞬速く押し出す   // 全体の速さ（元は 1） if (r < 1.001) p *= 1.001 / r;
+  float top = .12 + 1. * fs;   // 炎の長さ：大きさで決める
+  oA = vec4(p, ph); oB = vec4(1, mm * smoothstep(0., .1, ph) * (1. - ph) * 2.2 * (.35 + 3. * fs) * (1. - smoothstep(top * .4, top, r - 1.)), mm, fs);   // 大きな炎ほど明るく（白く飛ぶ塊）
+}`;
+const DRAW_VS = GLSL_COMMON + `
+uniform sampler2D A, B; uniform mat3 rot; uniform float D, F, R2, bright; uniform vec2 res;
+out float vb;
+void main() {
+  ivec2 ip = ivec2(gl_VertexID % TEX, gl_VertexID / TEX);
+  vec4 a = texelFetch(A, ip, 0), b = texelFetch(B, ip, 0);
+  vec3 c = rot * a.xyz; float zc = c.z + D; vec2 X = vec2(c.x, -c.y) * F / zc;
+  gl_PointSize = 1.; vb = 0.; gl_Position = vec4(2, 2, 2, 1);
+  if (zc < .3 || (c.z > 0. && dot(X, X) < R2)) return;   // カメラの後ろ・球の裏
+  float r = length(a.xyz);
+  bool front = dot(X, X) < R2 * .95;
+  vb = bright * ((front ? .08 : .04) + (front ? .45 : .6) * smoothstep(.0, .6, b.y));   // 正面の粒子は控えめに（オリジナルの正面はほぼ黒で、筋が横切るだけ）   // 正面に見えている粒子だけ明るく（点の質感を残す）。縁は真横から見て何百粒も重なるので、噴き上げていない粒子はほぼ消す
+  if (pcg(uint(gl_VertexID) * 7u + 3u) % 1000u < 5u) vb = bright * 1.5;   // 0.5% は星のような明るい点   // 噴き上げる場所の粒子だけ光らせる（ここがフィードバックの湧き口になる）
+  gl_Position = vec4(X.x / (res.x * .5), -X.y / (res.y * .5), 0, 1);
+}`;
+const DRAW_FS = `#version 300 es
+precision highp float; in float vb; out vec4 o; void main() { o = vec4(vb, 0, 0, 1); }`;
+const QUAD_VS = `#version 300 es
+void main() { vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4. - 1.; gl_Position = vec4(p, 0, 1); }`;
+const FADE_FS = `#version 300 es
+precision highp float; out vec4 o; void main() { o = vec4(0); }`;
+// フィードバック：前のコマの絵を、球の中心から少し拡大し、ノイズでゆがめ、少し暗くして描き直す。
+// 毎コマ繰り返すので、絵全体が球から外へ噴き上がり、もくもく曲がる。白い所は積み上がって白く飛ぶ
+const FB_FS = GLSL_COMMON + `
+uniform sampler2D prev; uniform vec2 res; uniform float zoom, warp, decay, t, S, R, inKeep, mosh;
+out vec4 o;
+void main() {
+  vec2 p = gl_FragCoord.xy - res * .5, n = p / S;
+  float rr = length(p);
+  vec2 u = n - n / max(length(n), .01) * t * .6;   // ゆがみの模様そのものも外へ流す（炎の舌が根元から先へ走るように）
+  vec2 d = vec2(snoise(vec3(u * 3., t)), snoise(vec3(u * 3. + 17., t))) + .7 * vec2(snoise(vec3(u * 9., t * 2.)), snoise(vec3(u * 9. + 5., t * 2.)));
+  float outer = smoothstep(R * .9, R * 1.1, rr);
+  if (outer < 1.) d = mix(vec2(snoise(vec3(n * 3., t)), snoise(vec3(n * 3. + 17., t))), d, outer);   // 正面は細かいゆがみを切る
+  vec2 q = p / (1. + zoom * mix(.3, 1., outer)) - d * warp * S * mix(.25, 1., outer);   // 正面はゆがみを外の4分の1に（ゆがみが積み重なって渦になるのを抑える）   // 球の中は外の3割の速さで外へ流す（正面の模様が縁の噴き上げへつながる）
+  if (mosh > 0.) {   // データモッシュ：16px のブロックごとに、そろった向きで前のコマを引きずる。3割は止まって固まり、たまに大きく飛ぶ
+    vec2 bl = floor(gl_FragCoord.xy / 16.); uint hs = pcg(uint(bl.x + 400.) * 73856093u ^ uint(bl.y + 400.) * 19349663u ^ uint(t * 4.) * 83492791u); float fr = h1(hs);
+    vec2 mv = vec2(snoise(vec3(bl * .09, t * 3.)), snoise(vec3(bl * .09 + 11., t * 3.))) * S * .012 * mosh;
+    if (fr < .3) mv = vec2(0); else if (fr > .93) mv *= 4.;
+    q = p - mv;
+  }
+  o = texture(prev, (q + res * .5) / res) * decay * mix(inKeep, 1., smoothstep(R * .97, R * 1.02, rr));   // 球の中：拡大せずゆがめるだけ。外より早く消す（表面の跡が巻かれて輪や筋になる）
+}`;
+// 仕上げ：明るさにして、球・反転・RGB のずれ・横スライス・衝撃波・もや
+const POST_FS = GLSL_COMMON + `
+uniform sampler2D acc; uniform vec2 res; uniform float tt, pulse, gain, ca, glitch, R, ex, haze, hz, ringR, ringW, ringA, flash, S; uniform uint gseed; uniform int inv;
+out vec4 o;
+float lv(vec2 q) { q = clamp(q, vec2(0), res - 1.); return 1. - exp(-texelFetch(acc, ivec2(q.x, res.y - 1. - q.y), 0).r * gain); }
+void main() {
+  vec2 p = vec2(gl_FragCoord.x, res.y - gl_FragCoord.y);   // 左上が原点
+  uint s = pcg(uint(p.y / 24.) + gseed * 7919u); float off = 0.;
+  if (glitch > .05 && h1(s) < .35 * glitch) off = (h1(s) - .5) * S * .25 * glitch;
+  vec2 q = vec2(p.x + off, p.y);
+  vec3 col = vec3(lv(q + vec2(ca, 0)), lv(q), lv(q - vec2(ca, 0))) * 255.;
+  vec2 rel = p - res * .5; float d = length(rel), m = 1., add = flash;
+  if (d < R + 1.5) {   // 球：左上から光が当たる暗い面と、薄い縁の光
+    float e2 = clamp((R + 1.5 - d) / 3., 0., 1.), q2 = d * d / (R * R), nzz = sqrt(max(0., 1. - q2));
+    vec2 n = rel / R; float lam = max(0., -.45 * n.x - .55 * n.y + .7 * nzz);
+    m = mix(1., .25 + 1.1 * lam, e2);   // 左上から光が当たるように、球の上の粒子に陰をつける（明るい側は白く、影の側は沈む）。縁の外は変えない
+    add = (1. - e2) * flash;
+    // 球そのものの陰影：左上から淡く光が当たり、表面の模様がゆっくり流れる（球が止まった穴に見えないように）
+    vec3 sn = vec3(n.x, -n.y, nzz); float ca = cos(tt * .06), sa = sin(tt * .06); sn = vec3(ca * sn.x + sa * sn.z, sn.y, -sa * sn.x + ca * sn.z);
+    float gr = .55 + .2 * snoise(sn * 7. + vec3(0, tt * .05, 0)) + .2 * snoise(sn * 22. + vec3(tt * .1, 0, 0));   // 細かい表面の模様（大きなまだらにしない）
+    add += e2 * (175. + 40. * pulse) * pow(lam, 2.) * gr;   // 仕上げのレベル補正で薄い所は黒に沈むので、強めに足す
+  } else {
+    add += haze * exp((R - d) / hz);
+    float qq = abs(d - ringR); if (ringA > 2. && qq < ringW) add += ringA * (1. - qq / ringW);
+  }
+  float rimL = (d - R) / max(1.2, S * .0015); uint rs = pcg(uint(atan(rel.y, rel.x) * 40. + 99.)); add += 170. * exp(-rimL * rimL) * (.55 + .45 * h1(rs));   // 縁の細い光の輪（全周、少しむらをつける）
+  col = smoothstep(.25, .8, min(col * m + add, 255.) / 255.);   // レベル補正：薄い所は真っ黒、重なった所だけ白く飛ばす   // 黒側を沈めてコントラストを上げる
+  o = vec4(inv == 1 ? 1. - col : col, 1);
+}`;
+function prog(vs, fs) {
+  const p = gl.createProgram();
+  for (const [t, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const sh = gl.createShader(t); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(p, sh);
+  }
+  gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const loc = {}; p.u = n => n in loc ? loc[n] : (loc[n] = gl.getUniformLocation(p, n));
+  return p;
+}
+const P_UP = prog(QUAD_VS, UPDATE_FS), P_DRAW = prog(DRAW_VS, DRAW_FS), P_FADE = prog(QUAD_VS, FADE_FS), P_POST = prog(QUAD_VS, POST_FS), P_FB = prog(QUAD_VS, FB_FS);
+function tex(w, h, fmt, type) {
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, fmt, w, h, 0, gl.RGBA, type, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  return t;
+}
+function fbo(...ts) {
+  const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  ts.forEach((t, i) => gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t, 0));
+  gl.drawBuffers(ts.map((_, i) => gl.COLOR_ATTACHMENT0 + i));
+  return f;
+}
+const ST = [0, 1].map(() => { const a = tex(TEX, TEX, gl.RGBA32F, gl.FLOAT), b = tex(TEX, TEX, gl.RGBA32F, gl.FLOAT); return { a, b, f: fbo(a, b) }; });
+let cur = 0, accT = null, accF = null, acc2 = null;
+function bindTex(p, name, t, unit) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(p.u(name), unit); }
+function step(U) {   // 粒子を1コマ進める
+  const src = ST[cur], dst = ST[cur ^ 1];
+  gl.useProgram(P_UP); gl.bindFramebuffer(gl.FRAMEBUFFER, dst.f); gl.viewport(0, 0, TEX, TEX); gl.disable(gl.BLEND);
+  bindTex(P_UP, 'A', src.a, 0); bindTex(P_UP, 'B', src.b, 1);
+  for (const k of ['dt', 'nz', 'flow', 'radial', 'jetV', 'hotT', 'hotJump', 'burst']) gl.uniform1f(P_UP.u(k), U[k] || 0);
+  gl.uniform1f(P_UP.u('crackW'), U.crackW || 0.06);
+  gl.uniform4fv(P_UP.u('fl'), U.fl || new Float32Array(16)); gl.uniform1f(P_UP.u('flSum'), U.flSum || 0);
+  gl.uniform1ui(P_UP.u('seed'), U.seed >>> 0); gl.uniform1i(P_UP.u('init'), U.init ? 1 : 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3); cur ^= 1;
+}
+// 最初に少し流しておく（全部の粒子が表面に貼りついた絵から始まらないように）
+step({ init: 1, seed: 1 });
+for (let k = 0; k < 150; k++) step({ dt: 1 / 30, nz: (k - 150) / 30 * 0.3, flow: 0.5, radial: 0, hotJump: 3.7, seed: k + 2 });   // 5秒流して、殻の層ができた状態から始める
+
+let W, H, S;
+const oc = glc;
+function setSize() {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  c.width = W; c.height = H; S = Math.min(W, H); glc.width = W; glc.height = H;
+  acc2 = [0, 1].map(() => { const t = tex(W, H, gl.RGBA16F, gl.HALF_FLOAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); return { t, f: fbo(t) }; });   // 補間しない（網目の点・モアレが残る）
+  accT = acc2[0].t; accF = acc2[0].f;
+}
+
+let prevT = null, frameN = 0, hotJump = 3.7, prevBig = null;
+// 噴き上げ：0 番はいつも弱く噴いて場所がゆっくり動く。1〜3 番はキックで生まれて弱まっていく
+const FLS = [1, 2, 3].map(() => ({ d: [0, 1, 0], t0: -99, amp: 0 })), flU = new Float32Array(16);
+let flNext = 0;
+function flare(amp, m) {   // カメラから見て球の縁に近い場所に置く（横に吹き上がる形が見えるように）
+  const a = rnd() * 6.283, v = [Math.cos(a), Math.sin(a), rnd() * 0.5 - 0.3], l = Math.hypot(...v);
+  // カメラの座標 → 世界の座標（回転の転置）
+  const w = [0, 1, 2].map(j => (m[j] * v[0] + m[3 + j] * v[1] + m[6 + j] * v[2]) / l);
+  const f = FLS[flNext]; flNext = (flNext + 1) % 3; f.d = w; f.t0 = prevT; f.amp = amp;
+}
+let fpsN = 0, fpsT = performance.now();
+function frame() {
+  if (++fpsN, performance.now() - fpsT > 1000) { document.getElementById('fps').textContent = fpsN + ' fps'; fpsN = 0; fpsT = performance.now(); }   // 実際に描けているコマ数（1秒ごと）
+  const now = ac ? ac.currentTime - t0 : performance.now() / 1000;
+  const tl = ((now % LOOP) + LOOP) % LOOP, dt = prevT === null ? 1 / 30 : Math.min(Math.max(now - prevT, 0), 0.1);
+  const bigT = last(tl, 'big'), ex = Math.exp(-(tl - bigT) * 1.3), kickNow = bigT !== prevBig && tl - bigT < 0.1;   // 最後の大きいキックが変わったコマ（ループの継ぎ目もまたぐ）
+  const sm = Math.exp(-(tl - last(tl, 'small')) * 7);
+  let kT = -99, kV = 0; for (const e of EV) { if (e.t > tl) break; if (e.type === 'big' || e.type === 'small') { kT = e.t; kV = e.v || 1; } }
+  const pulse = kV * Math.exp(-(tl - kT) * 7);
+  const rollS = CYC + 12 * BEAT, sinceChord = tl - last(tl, 'big');   // モッシュ：ロール中にだんだん強く、和音の頭から 0.5 秒
+  const mosh = !FX ? 0 : Math.max(tl > rollS ? Math.min(1, (tl - rollS) / (LOOP - rollS)) ** 0.7 : 0, sinceChord > 0.03 && sinceChord < 0.5 ? 0.7 * (1 - sinceChord / 0.5) : 0);   // キックで噴き出しが一瞬強まり、すぐ戻る
+  const ph = (tl % CYC) / CYC, inh = Math.max(0, (ph - 0.47) / 0.53) ** 2;   // 吸う強さ 0..1
+  frameN++; prevT = now; prevBig = bigT;
+  if (FX && kickNow) hotJump += 7.3;   // キックで膜を表面に戻し、流れの模様を替える   // キックで燃えるところが入れ替わる
+  // カメラ：ほぼ止まっていて、キックで少し球へ寄る（ドリー）
+  const sb = FX ? tl - bigT : 99, D = 3.6 - 0.4 * Math.exp(-sb * 4) + (FX ? 0.08 * inh : 0), F = S * 1.15;   // 1.05 から拡大
+  const yaw = 0, pitch = 0.15;   // 元の作品のように、ほぼ止まって見える
+  const cyw = Math.cos(yaw), syw = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const cx = W / 2, cy = H / 2, R = F / Math.sqrt(D * D - 1);
+
+  // 噴き上げの場所と強さ。行列の行：x1, y2, z2
+  const M = [cyw, 0, syw, syw * sp, cp, -cyw * sp, -syw * cp, sp, cyw * cp];
+  if (kickNow) for (let k = 0; k < 3; k++) flare(1.2, M);
+  else if (prevT !== null && sm > 0.9 && tl - last(tl, 'small') < dt) flare(0.7, M);
+  const th = now * 0.23, ph0 = 1.2 + 0.6 * Math.sin(now * 0.17);
+  flU.set([Math.sin(ph0) * Math.cos(th), Math.cos(ph0), Math.sin(ph0) * Math.sin(th), 0.5 + 0.3 * inh], 0);
+  FLS.forEach((f, k) => { const age = now - f.t0; flU.set([...f.d, f.amp * Math.exp(-age * 1.1) * Math.min(1, age * 20)], 4 + k * 4); });
+  let flSum = 0; for (let k = 3; k < 16; k += 4) flSum += flU[k];
+  const crackW = 0.05 + 0.07 * ex;   // ひびの太さ：キックで割れ目が開く
+  // 粒子を進める
+  step({ dt, nz: now * 0.3, flow: FX ? 0.5 + 0.3 * ex : 0.5, radial: FX ? 0.3 * ex - 0.02 * inh : 0, jetV: 0,
+         hotT: now * 0.5, hotJump, burst: pulse, seed: frameN * 977 + 3, fl: flU, flSum, crackW });
+
+  // 残像を減らしてから、点を足す
+  // フィードバック：前のコマ（acc2[0]）を拡大・ゆがめて acc2[1] に描き、入れ替える
+  gl.bindFramebuffer(gl.FRAMEBUFFER, acc2[1].f); gl.viewport(0, 0, W, H); gl.disable(gl.BLEND);
+  gl.useProgram(P_FB); bindTex(P_FB, 'prev', acc2[0].t, 0);
+  gl.uniform2f(P_FB.u('res'), W, H); gl.uniform1f(P_FB.u('zoom'), FB.zoom * dt * 30); gl.uniform1f(P_FB.u('warp'), FB.warp * dt * 30);
+  gl.uniform1f(P_FB.u('decay'), mosh > 0 ? 0.86 + 0.06 * mosh : Math.pow(FB.decay, dt * 30)); gl.uniform1f(P_FB.u('mosh'), mosh); gl.uniform1f(P_FB.u('t'), now * 0.5); gl.uniform1f(P_FB.u('S'), S); gl.uniform1f(P_FB.u('R'), R); gl.uniform1f(P_FB.u('inKeep'), mosh > 0 ? 0.6 : FB.inKeep);   // 球の上は早く消す
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  acc2.reverse(); accT = acc2[0].t; accF = acc2[0].f;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, accF); gl.enable(gl.BLEND);
+  gl.useProgram(P_DRAW); gl.blendFunc(gl.ONE, gl.ONE);
+  // 回転：yaw（y 軸）→ pitch（x 軸）。列優先
+  const ROT = [cyw, syw * sp, -syw * cp, 0, cp, sp, syw, -cyw * sp, cyw * cp];
+  gl.uniformMatrix3fv(P_DRAW.u('rot'), false, ROT);
+  gl.uniform1f(P_DRAW.u('D'), D); gl.uniform1f(P_DRAW.u('F'), F); gl.uniform1f(P_DRAW.u('R2'), R * R); gl.uniform1f(P_DRAW.u('bright'), BRIGHT * (1 + 0.4 * pulse) * (1 - 0.6 * mosh));   // モッシュ中は新しい粒子をうっすら（前の絵が崩れながら残る）
+  bindTex(P_DRAW, 'A', ST[cur].a, 0); bindTex(P_DRAW, 'B', ST[cur].b, 1);
+  gl.uniform2f(P_DRAW.u('res'), W, H);
+  gl.drawArrays(gl.POINTS, 0, TEX * TEX);
+  gl.disable(gl.BLEND);
+
+  // ---- 仕上げ：派手にする ----
+  const sec = Math.floor(tl / CYC), sinceBig = sb, snT = last(tl, 'snare');
+  // 派手さはキックとスネアの瞬間にだけ短く入れる。普段は元の作品くらいの落ち着いた白黒
+  const sinceSn = snT > 0 ? tl - snT : 9, sinceSm = tl - last(tl, 'small'), sinceCl = tl - last(tl, 'clap');
+  const inv = FX && (sinceBig < 0.07 || sinceSn < 0.03);   // 反転は和音の頭の強いキックだけ   // 反転：キックで2コマ、4周目はロールの1打ごとに1コマ
+  const ca = !FX ? 0 : Math.round(S * (0.025 * Math.exp(-sinceBig * 14) + (sec >= 1 ? 0.012 * Math.exp(-sinceSm * 20) : 0) + 0.012 * Math.exp(-sinceSn * 30) + 0.014 * Math.exp(-sinceCl * 18)));   // RGB のずれ（クラップでも）
+  const glitch = !FX ? 0 : (sec >= 1 ? Math.exp(-sinceBig * 12) : 0) + 0.5 * Math.exp(-sinceSn * 30) + 0.45 * Math.exp(-sinceCl * 16);   // 横スライス（クラップでも）   // 横スライスのずれ
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H); gl.useProgram(P_POST);
+  bindTex(P_POST, 'acc', accT, 0);
+  const U = { gain: FX ? 1.5 + 0.6 * ex : 1.5, ca, glitch, R, ex, haze: 0, hz: S * 0.07, ringR: R + sinceBig * S * 0.9, ringW: S * 0.012,
+              ringA: 0, flash: 50 * Math.exp(-sinceBig * 12), S, tt: now, pulse };
+  for (const k in U) gl.uniform1f(P_POST.u(k), U[k]);
+  gl.uniform2f(P_POST.u('res'), W, H); gl.uniform1ui(P_POST.u('gseed'), frameN); gl.uniform1i(P_POST.u('inv'), inv ? 1 : 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  const zm = !FX ? 1 : 1 + 0.06 * Math.exp(-sinceBig * 10) + 0.03 * Math.exp(-sinceSm * 15) + 0.03 * Math.exp(-sinceSn * 25);   // ズームのパンチ
+  ctx.setTransform(zm, 0, 0, zm, cx * (1 - zm), cy * (1 - zm)); ctx.drawImage(oc, 0, 0); ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('aspect').onchange = setSize; setSize();
+requestAnimationFrame(frame);
+document.getElementById('play').onclick = audio;
+c.onpointerdown = audio;
+
+document.getElementById('rec').onclick = e => {
+  audio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `corona_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+</script>
+</body>
+</html>
