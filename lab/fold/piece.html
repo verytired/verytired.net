@@ -25,7 +25,7 @@
   <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="15"></label>
   <button id="rec">● 録画して保存</button>
 </div>
-<video src="src/fold_src.mp4" muted loop playsinline preload="none"></video>
+<video src="src/fold_src.mp4" muted loop playsinline preload="auto"></video>
 
 <script>
 // 90年代のビデオカメラで撮った資料映像のような「事件」の4場面を、128 BPM のビートでつなぐ15秒のループ（32拍＝8小節、1場面8拍）。
@@ -50,7 +50,7 @@ const last = (tl, type) => { let x = -99; for (const e of EV) { if (e.t > tl) br
 let ac = null, t0 = 0, out, verb, noiseBuf, nextEv = 0, loopN = 0;
 function audio() {
   if (ac) return;
-  vid.play();   // 23MB の素材は音を鳴らす時に読み始める（開いただけでは読まない）。位置は毎コマ frame() が合わせる
+  vid.play();   // 素材は開いた時点で読み始める（プレイヤーは読めるまで Play を押させない）。位置は毎コマ frame() が合わせる
   ac = new AudioContext();
   const comp = ac.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 4;
   out = ac.createGain(); out.gain.value = 0.8; out.connect(comp); comp.connect(ac.destination);
@@ -284,6 +284,8 @@ document.getElementById('rec').onclick = e => {
   btn.disabled = true; btn.textContent = '録画中…';
   rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
 };
+// verytired.net のプレイヤーと render.py への窓口（README「作品側の決まり」）。ready は動画のほかに待つもの、media は再生と一緒に止める動画、output は音の出口
+window.piece = { media: () => [vid], output: () => out };
 </script>
 </body>
 </html>

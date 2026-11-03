@@ -499,6 +499,8 @@ $('rec').onclick = e => {
   btn.disabled = true; btn.textContent = '録画中…';
   rec.start(); setTimeout(() => rec.stop(), $('dur').value * 1000);
 };
+// verytired.net のプレイヤーと render.py への窓口（README「作品側の決まり」）。ready は動画のほかに待つもの、media は再生と一緒に止める動画、output は音の出口
+window.piece = { ready: () => !!pose, media: () => vids, output: () => out };
 </script>
 
 </body>
