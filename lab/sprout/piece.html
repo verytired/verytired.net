@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sprout</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }</script>
+</head>
+<body>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="13"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<canvas id="c"></canvas>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+const c = document.getElementById('c');
+const CUBE = 0.06;             // 立方体の一辺（＝粒の間隔）
+const CAP = 40000;             // ponytail: 粒の上限。寿命で消えるので数は頭打ちになる（約2万）。超えたら噴かない
+const RMAX = 26000;            // 1秒あたりに噴く数のいちばん多いところ
+
+// ---- 乱数（書き出しと手で録るので同じ形になるよう種を固定）
+let seed = 1;
+const rnd = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+// ---- 場面
+const renderer = new THREE.WebGLRenderer({ canvas: c, antialias: true, preserveDrawingBuffer: true });
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x000000);
+const cam = new THREE.PerspectiveCamera(40, 1, 0.05, 200);
+
+// 全体の光は弱く、平行光を強く：塊の内側と立方体どうしの影を暗く残す
+scene.add(new THREE.HemisphereLight(0x8899ff, 0x220044, 0.6));   // 空からは青、下からは紫を少し
+const sun = new THREE.DirectionalLight(0xffffff, 3.4);
+sun.position.set(-3, 6, 2); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -4, right: 4, top: 4, bottom: -4, near: 0.5, far: 20 });
+sun.shadow.bias = -0.0005;
+scene.add(sun);
+
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshLambertMaterial({ color: 0x0a0c24 }));
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true;   // 地面は置かない（宇宙に浮かぶ）
+const SEED_BOX = 0.32;
+const box = new THREE.Mesh(new THREE.BoxGeometry(SEED_BOX, SEED_BOX, SEED_BOX), new THREE.MeshLambertMaterial({ color: 0xffffff }));
+box.position.set(-0.45, SEED_BOX / 2, 0.6);   // 箱は噴き出し口ではなく、手前左に置いてあるだけ
+box.castShadow = box.receiveShadow = true;   // 白い箱も置かない
+
+// 星：遠くに小さな点をまばらに散らす
+{
+  const n = 1500, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { const u = Math.random() * 2 - 1, a = Math.random() * 6.283, r = 40 + Math.random() * 60, q = Math.sqrt(1 - u * u); pos.set([Math.cos(a) * q * r, u * r, Math.sin(a) * q * r], i * 3); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x9aa6ff, size: 1.6, sizeAttenuation: false })));
+}
+
+// 光のにじみ（bloom）：明るいところの光をまわりへにじませる
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, cam));
+const bloom = new UnrealBloomPass(new THREE.Vector2(1080, 1080), 0.95, 0.5, 0.33);   // 強さ・広がり・にじみ始める明るさ
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+// VHS：行ごとの横ずれ、輝度と色の横のにじみ（色は右へ大きくずれる）、網目模様（ドットクロール）、走査線、下端の乱れた帯。キックで強まる
+const vhs = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, time: { value: 0 }, kick: { value: 0 }, burst: { value: 0 }, res: { value: new THREE.Vector2(1080, 1080) } },
+  vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float time, kick, burst; uniform vec2 res; varying vec2 vUv;
+    float h(float n) { return fract(sin(n * 91.345) * 47453.21); }
+    vec3 yiq(vec3 c) { return mat3(0.299, 0.596, 0.211, 0.587, -0.274, -0.523, 0.114, -0.322, 0.312) * c; }
+    vec3 rgb(vec3 c) { return mat3(1.0, 1.0, 1.0, 0.956, -0.272, -1.106, 0.621, -0.647, 1.703) * c; }
+    void main() {
+      vec2 uv = vUv;
+      float line = floor(uv.y * 240.0), fr = floor(time * 30.0);
+      // 行ごとの横ずれ：細かい揺れ＋ときどき太い帯がずれる（キックと4小節ごとに強く）
+      float jit = (h(line + fr * 13.0) - 0.5) * (0.0008 + 0.002 * kick);
+      float band = floor(uv.y * 18.0 + h(fr) * 4.0);
+      jit += step(0.86 - 0.25 * kick - 0.5 * burst, h(band + fr * 7.0)) * (h(band * 3.0 + fr) - 0.5) * (0.015 + 0.04 * burst);
+      float bottom = smoothstep(0.045, 0.0, uv.y);   // 下端のヘッド切り替えの帯
+      jit += bottom * (h(line + fr) - 0.3) * 0.08;
+      uv.x += jit;
+      // 輝度は少し、色は大きく、右へにじませる（左の画素を重みつきで足す）
+      vec3 acc = vec3(0.0); float wy = 0.0, wc = 0.0; vec2 c = vec2(0.0);
+      float px = 1.0 / res.x, cs = 0.003 + 0.004 * kick + 0.012 * burst;
+      for (int i = 0; i < 10; i++) {
+        float fi = float(i);
+        vec3 q = yiq(texture2D(tDiffuse, uv - vec2(fi * px * 1.5, 0.0)).rgb);
+        float w = exp(-fi * 0.55); acc.x += q.x * w; wy += w;
+        vec3 q2 = yiq(texture2D(tDiffuse, uv - vec2(cs + fi * px * 4.0, 0.0)).rgb);
+        float w2 = exp(-fi * 0.2); c += q2.yz * w2; wc += w2;
+      }
+      vec3 o = vec3(acc.x / wy, c / wc * 1.25);
+      // 網目模様：色の強いところに細かい斜めの縞
+      o.x += 0.025 * sin((gl_FragCoord.x + gl_FragCoord.y) * 1.9 + time * 40.0) * length(o.yz) * 2.0;
+      vec3 col = rgb(o);
+      col *= 0.95 + 0.05 * sin(gl_FragCoord.y * 3.1416 * 0.5);        // 走査線
+      col += (h(gl_FragCoord.x * 0.37 + gl_FragCoord.y * 1.71 + fr) - 0.5) * 0.035;   // ざらつき
+      col = mix(col, vec3(h(gl_FragCoord.x + fr) * 0.6), bottom * 0.5);
+      vec2 d = vUv - 0.5; col *= 1.0 - dot(d, d) * 0.9;              // 四隅を暗く
+      col = mix(texture2D(tDiffuse, vUv).rgb, col, 0.6);   // 元の絵と混ぜて弱める
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+});
+composer.addPass(vhs);
+
+// 立方体は自分でも光る：色をそのまま自分の光（emissive）として足す。影の側も沈まず、内側から光って見える
+const GLOW = 0.58;
+const cubeMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+cubeMat.onBeforeCompile = sh => { sh.fragmentShader = sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\n totalEmissiveRadiance += vColor * ${GLOW.toFixed(2)};`); };
+const cubes = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), cubeMat, CAP);
+cubes.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+cubes.castShadow = cubes.receiveShadow = true; cubes.frustumCulled = false;
+scene.add(cubes);
+const M = cubes.instanceMatrix.array;
+cubes.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(CAP * 3), 3);
+cubes.instanceColor.setUsage(THREE.DynamicDrawUsage);
+const COL = cubes.instanceColor.array;
+// 色：4色（電気のような青・紫・ピンク・水色）。芽ごとに1色を選び、分かれた枝はときどき隣の色に変わる
+const COLS = [[0.12, 0.22, 1.0], [0.55, 0.2, 1.0], [1.0, 0.32, 0.78], [0.2, 0.85, 1.0]];
+
+
+// ---- 流体：立方体1個が1つの粒。粒どうしは近すぎると押し合い、離れると引き合う（Clavet ら 2005 の double density relaxation）。
+// だから塊としてまとまり、縁から腕やしぶきがちぎれる。噴き出し口（床の上、箱の奥）から噴き続け、粒は消さない
+const X = new Float32Array(CAP), Y = new Float32Array(CAP), Z = new Float32Array(CAP);
+const QX = new Float32Array(CAP), QY = new Float32Array(CAP), QZ = new Float32Array(CAP);   // 1つ前の位置
+const VX = new Float32Array(CAP), VY = new Float32Array(CAP), VZ = new Float32Array(CAP);
+const DXa = new Float32Array(CAP), DYa = new Float32Array(CAP), DZa = new Float32Array(CAP), SZ = new Float32Array(CAP), AGE = new Float32Array(CAP), LIFE = new Float32Array(CAP), CC = new Float32Array(CAP * 3);
+let N = 0, simT = 0;
+const LIFE_MIN = 2.8, LIFE_RND = 1;   // 粒の寿命（秒）：2.8〜3.8秒（枝の形でとどまる HOLD のあと1〜2秒で崩れて消える）
+const DT = 1 / 60, G = 0;   // 重力なし：宇宙に浮かぶ
+const Hh = CUBE * 2.2, RHO0 = 3.5, K = 0.006, KN = 0.03, VIS = 0.06;   // VIS：粘り（近くの粒と速さをそろえる）   // 影響半径・落ち着く密度・押し合う強さ（近いときの強さ）
+const rate = t => RMAX * (0.35 + 0.65 * Math.min(1, t / 7));   // 音の強さに使う（噴く量の目安）
+
+// ---- 芽：床から伸びる先端。渦に沿って巻きながら上へ進み、ときどき2本に分かれる（分かれた先もまた分かれる＝フラクタルな枝）。
+// 先端は通った跡に立方体を落とす。落ちた立方体は流体の動きに任せ、寿命で消える＝植物が伸びながら後ろから崩れて散る
+let tips = [], rootAcc = 0;
+const MAX_TIPS = 72, MAX_GEN = 4, TIP_RATE = 240, HOLD = 1.8;   // HOLD：落ちた立方体は、この秒数だけ押し合わずに流れる（枝の形のまま動く）。そのあと押し合って崩れる   // 先端の数の上限・分かれる回数・1本が1秒に落とす立方体の数
+const newTip = (x, y, z, dx, dy, dz, gen, t, col = Math.floor(rnd() * 4)) => {
+  if (tips.length >= MAX_TIPS) return;
+  const l = Math.hypot(dx, dy, dz);
+  tips.push({ x, y, z, dx: dx / l, dy: dy / l, dz: dz / l, gen, col, age: 0, life: 2.6 + rnd() * 1.4 - gen * 0.3,
+    split: 0.5 + rnd() * 0.7, sp: 0.85 * (1 - gen * 0.08) * (t < 0.05 ? 3 : 1), acc: 0, ph: rnd() * 6.283 });
+};
+const newRoot = t => {   // 中心のまわりから、でたらめな向きへ芽を出す
+  const a = rnd() * 6.283, r = 0.15 + rnd() * 0.6;
+  const u = rnd() * 2 - 1, q = Math.sqrt(1 - u * u), dx = Math.cos(a) * q, dy = u, dz = Math.sin(a) * q;
+  newTip(dx * r * 0.3, dy * r * 0.3, dz * r * 0.3, dx, dy, dz, 0, t);
+};
+const stepTips = t => {
+  // 芽はキックに合わせて出す：頭の一打で14本（最初の1秒で何が起きているか分かるように）、拍ごとに2本、小節の頭で3本
+  const b0 = Math.floor((t - DT) / BEAT), b1 = Math.floor(t / BEAT);
+  if (t === 0 || b1 > b0) for (let i = 0, n = t === 0 ? 14 : b1 % 4 === 0 ? 3 : 2; i < n; i++) newRoot(t);
+  const born = [];
+  for (const p of tips) {
+    p.age += DT;
+    // 向き：渦に沿って巻き、少し上へ戻ろうとする
+    const k = curl(p.x * 1.3, p.y * 1.1, p.z * 1.3, t * 0.5 + p.ph), c = 1.4 * DT;
+    p.dx += k[0] * c; p.dy += k[1] * c;   // 向きは渦だけで曲げる（上へ戻る力はなし）
+    { const d = Math.hypot(p.x, p.y, p.z) || 1; p.dx += p.x / d * 0.3 * DT; p.dy += p.y / d * 0.3 * DT; p.dz += p.z / d * 0.3 * DT; }   // 少しだけ外へ p.dz += k[2] * c;
+    const l = Math.hypot(p.dx, p.dy, p.dz); p.dx /= l; p.dy /= l; p.dz /= l;
+    p.x += p.dx * p.sp * DT; p.y += p.dy * p.sp * DT; p.z += p.dz * p.sp * DT;
+    // 分かれる：自分と子を、進む向きから逆に開く
+    if (p.age > p.split && p.gen < MAX_GEN) {
+      // 進む向きと直角な向き（でたらめなベクトルとの外積）
+      const qx = rnd() - 0.5, qy = rnd() - 0.5, qz = rnd() - 0.5;
+      let ux = p.dy * qz - p.dz * qy, uy = p.dz * qx - p.dx * qz, uz = p.dx * qy - p.dy * qx; const ul = Math.hypot(ux, uy, uz) || 1; ux /= ul; uy /= ul; uz /= ul;
+      const o = 0.6 + rnd() * 0.3;
+      born.push([p.x, p.y, p.z, p.dx + ux * o, p.dy + uy * o, p.dz + uz * o, p.gen + 1, (p.col + (rnd() < 0.3 ? 1 : 0)) % 4]);
+      p.dx -= ux * o * 0.6; p.dy -= uy * o * 0.6; p.dz -= uz * o * 0.6;
+      p.gen++; p.split = p.age + 0.5 + rnd() * 0.7;
+    }
+    // 立方体を落とす：先端のまわりの小さな円の中。枝が細くなるほど少なく
+    const R = 0.09 * Math.pow(0.78, p.gen);
+    p.acc += TIP_RATE * Math.pow(0.8, p.gen) * DT;
+    while (p.acc >= 1 && N < CAP) {
+      p.acc--;
+      const k2 = N++, rx = (rnd() - 0.5) * 1.3 * R, ry = (rnd() - 0.5) * 1.3 * R, rz = (rnd() - 0.5) * 1.3 * R, jit = 0.15 + 0.6 * Math.pow(rnd(), 4);
+      X[k2] = QX[k2] = p.x + rx; Y[k2] = QY[k2] = p.y + ry; Z[k2] = QZ[k2] = p.z + rz;
+      VX[k2] = p.dx * p.sp * 0.25; VY[k2] = p.dy * p.sp * 0.25; VZ[k2] = p.dz * p.sp * 0.25;   // 先端が進んでいた向きへ流れ続ける
+      DXa[k2] = p.dx; DYa[k2] = p.dy; DZa[k2] = p.dz; SZ[k2] = CUBE * (0.75 + 0.4 * rnd()) * (1 - p.gen * 0.08); AGE[k2] = 0; LIFE[k2] = LIFE_MIN + LIFE_RND * rnd();
+      const cc = COLS[p.col], br = 0.75 + 0.35 * rnd();   // 同じ色の中でも明るさをばらつかせる
+      CC[k2 * 3] = cc[0] * br; CC[k2 * 3 + 1] = cc[1] * br; CC[k2 * 3 + 2] = cc[2] * br;
+    }
+  }
+  tips = tips.filter(p => p.age < p.life && p.x * p.x + p.y * p.y + p.z * p.z < 16);
+  for (const b of born) newTip(b[0], b[1], b[2], b[3], b[4], b[5], b[6], t, b[7]);
+};
+
+// 近くの粒を探すための格子（ハッシュ）。ponytail: 別の升が同じ番号になると同じ粒を2回見ることがある。気になれば升の座標も比べる
+const TB = 1 << 17, cnt = new Int32Array(TB + 1), ord = new Int32Array(CAP), key = new Int32Array(CAP);
+const hcell = (ix, iy, iz) => ((ix * 73856093) ^ (iy * 19349663) ^ (iz * 83492791)) & (TB - 1);
+const buildGrid = () => {
+  cnt.fill(0);
+  for (let i = 0; i < N; i++) { key[i] = hcell(Math.floor(X[i] / Hh), Math.floor(Y[i] / Hh), Math.floor(Z[i] / Hh)); cnt[key[i] + 1]++; }
+  for (let i = 0; i < TB; i++) cnt[i + 1] += cnt[i];
+  const fill = cnt.slice(0, TB);
+  for (let i = 0; i < N; i++) ord[fill[key[i]]++] = i;
+};
+const nb = new Int32Array(256), nq = new Float32Array(256);
+const relax = () => {
+  for (let i = 0; i < N; i++) {
+    if (AGE[i] < HOLD) continue;
+    const xi = X[i], yi = Y[i], zi = Z[i], cx = Math.floor(xi / Hh), cy = Math.floor(yi / Hh), cz = Math.floor(zi / Hh);
+    let rho = 0, rhoN = 0, m = 0;
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) {
+      const h = hcell(cx + a, cy + b, cz + c);
+      for (let e = cnt[h], end = cnt[h + 1]; e < end && m < 256; e++) {
+        const j = ord[e]; if (j === i) continue;
+        const dx = X[j] - xi, dy = Y[j] - yi, dz = Z[j] - zi, r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 >= Hh * Hh) continue;
+        const q = 1 - Math.sqrt(r2) / Hh; rho += q * q; rhoN += q * q * q; nb[m] = j; nq[m] = q; m++;
+      }
+    }
+    const P = K * (rho - RHO0) * (rho < RHO0 ? 0.25 : 1), PN = KN * rhoN;   // 引き合う力は弱く：固まりすぎず、ちぎれて散る
+    let mx = 0, my = 0, mz = 0, ax = 0, ay = 0, az = 0, aw = 0;
+    for (let e = 0; e < m; e++) {
+      const j = nb[e], q = nq[e]; ax += VX[j] * q; ay += VY[j] * q; az += VZ[j] * q; aw += q;
+    }
+    if (aw > 0) { mx += (ax / aw - VX[i]) * VIS * DT; my += (ay / aw - VY[i]) * VIS * DT; mz += (az / aw - VZ[i]) * VIS * DT; }
+    for (let e = 0; e < m; e++) {
+      const j = nb[e], q = nq[e], dx = X[j] - xi, dy = Y[j] - yi, dz = Z[j] - zi, r = Math.hypot(dx, dy, dz) || 1e-6;
+      const D = (P * q + PN * q * q) * Hh * 0.5 / r;   // 押し合い（P が負なら引き合い）
+      if (AGE[j] >= HOLD) { X[j] += dx * D; Y[j] += dy * D; Z[j] += dz * D; } mx -= dx * D; my -= dy * D; mz -= dz * D;
+    }
+    X[i] += mx; Y[i] += my; Z[i] += mz;
+  }
+};
+const BX = -0.45, BZ = 0.6, BH = SEED_BOX / 2;   // 箱（粒は箱をよける）
+const collide = i => {
+  const s = SZ[i] / 2;
+  if (Y[i] < s) { Y[i] = s; X[i] = X[i] * 0.4 + QX[i] * 0.6; Z[i] = Z[i] * 0.4 + QZ[i] * 0.6; }   // 床：めりこまず、ねばりついて遅くなる
+  const dx = X[i] - BX, dz = Z[i] - BZ, e = BH + s;
+  if (Math.abs(dx) < e && Math.abs(dz) < e && Y[i] < SEED_BOX + s) {
+    const ux = e - Math.abs(dx), uz = e - Math.abs(dz), uy = SEED_BOX + s - Y[i];
+    if (uy < ux && uy < uz) Y[i] = SEED_BOX + s; else if (ux < uz) X[i] = BX + Math.sign(dx) * e; else Z[i] = BZ + Math.sign(dz) * e;
+  }
+};
+// うねり：ベクトルポテンシャル (sin·cos の積) の回転＝カールノイズ。発散がないので渦だけが残り、噴いた塊を巻く。時間でゆっくり動く
+const curl = (x, y, z, t) => {
+  const a = 1.7 * y + 0.6 * t, b = 1.5 * z + 0.4 * t + 2, c = 1.6 * x + 0.5 * t + 4;
+  return [-1.4 * Math.sin(c) * Math.sin(1.4 * y) - 1.5 * Math.cos(b) * Math.cos(1.9 * x),
+          -1.3 * Math.sin(a) * Math.sin(1.3 * z) - 1.6 * Math.cos(c) * Math.cos(1.4 * y),
+          -1.9 * Math.sin(b) * Math.sin(1.9 * x) - 1.7 * Math.cos(a) * Math.cos(1.3 * z)];
+};
+const SWIRL = 1.6;   // うねりの強さ（高いところほど強く巻く）
+const stepSim = () => {
+  const t = simT;
+  // 画面の上や遠くへ出た粒と、寿命が来た粒は消す（計算から外す。いちばん後ろの粒をその場所へ移す）
+  for (let i = 0; i < N; i++) while (i < N && (AGE[i] >= LIFE[i] || X[i] * X[i] + Y[i] * Y[i] + Z[i] * Z[i] > 25)) {
+    const l = --N;
+    X[i] = X[l]; Y[i] = Y[l]; Z[i] = Z[l]; QX[i] = QX[l]; QY[i] = QY[l]; QZ[i] = QZ[l]; VX[i] = VX[l]; VY[i] = VY[l]; VZ[i] = VZ[l];
+    DXa[i] = DXa[l]; DYa[i] = DYa[l]; DZa[i] = DZa[l]; SZ[i] = SZ[l]; AGE[i] = AGE[l]; LIFE[i] = LIFE[l]; CC[i * 3] = CC[l * 3]; CC[i * 3 + 1] = CC[l * 3 + 1]; CC[i * 3 + 2] = CC[l * 3 + 2];
+  }
+  stepTips(t);
+  const gy = -G * DT;
+  for (let i = 0; i < N; i++) {
+    VY[i] += gy;
+    const k = curl(X[i] * 0.6, Y[i] * 0.5, Z[i] * 0.6, t * 0.5), w = SWIRL * DT;   // 渦の模様は大きく：隣どうしが同じように動く
+    VX[i] += k[0] * w; VY[i] += k[1] * w * 0.6; VZ[i] += k[2] * w;
+    if (AGE[i] < HOLD) { VX[i] *= 0.97; VY[i] *= 0.97; VZ[i] *= 0.97; }   // 落ちたばかりはゆっくり漂う：枝の形を保ったまま動く
+    QX[i] = X[i]; QY[i] = Y[i]; QZ[i] = Z[i];
+    X[i] += VX[i] * DT; Y[i] += VY[i] * DT; Z[i] += VZ[i] * DT;
+    AGE[i] += DT;
+  }
+  buildGrid(); relax();
+  for (let i = 0; i < N; i++) {
+    VX[i] = (X[i] - QX[i]) / DT; VY[i] = (Y[i] - QY[i]) / DT; VZ[i] = (Z[i] - QZ[i]) / DT;
+    const vl = Math.hypot(VX[i], VY[i], VZ[i]); if (vl > 0.08) { DXa[i] = VX[i] / vl; DYa[i] = VY[i] / vl; DZa[i] = VZ[i] / vl; }   // 止まりかけても向きはそのまま
+  }
+  simT += DT;
+};
+// 進む向きに立方体を向ける。面ごとに光の当たり方が変わって、うろこのような筋になる。出たてのときは小さく
+const writeAll = () => {
+  for (let i = 0; i < N; i++) {
+    const o = i * 16, s = SZ[i] * Math.min(1, AGE[i] / 0.1, (LIFE[i] - AGE[i]) / 0.5), fx = DXa[i], fy = DYa[i], fz = DZa[i];
+    let rx = fz, rz = -fx; const rl = Math.hypot(rx, rz); if (rl < 1e-4) { rx = 1; rz = 0; } else { rx /= rl; rz /= rl; }   // 右 = 前 × 上
+    const ux = fy * rz, uy = fz * rx - fx * rz, uz = -fy * rx;
+    M[o] = rx * s; M[o + 1] = 0; M[o + 2] = rz * s; M[o + 3] = 0;
+    M[o + 4] = ux * s; M[o + 5] = uy * s; M[o + 6] = uz * s; M[o + 7] = 0;
+    M[o + 8] = fx * s; M[o + 9] = fy * s; M[o + 10] = fz * s; M[o + 11] = 0;
+    M[o + 12] = X[i]; M[o + 13] = Y[i]; M[o + 14] = Z[i]; M[o + 15] = 1;
+  }
+  COL.set(CC.subarray(0, N * 3)); cubes.instanceColor.needsUpdate = true;
+  cubes.count = N;
+};
+const reset = () => { seed = 1; N = 0; simT = 0; tips = []; rootAcc = 0; };
+window.simCount = () => N;   // 確認用：いま動いている粒の数
+
+// ---- 画面
+let W = 1080, H = 1080, CAMR = 6.5;
+const setSize = () => {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  renderer.setPixelRatio(1); renderer.setSize(W, H, false); composer.setSize(W, H); bloom.resolution.set(W, H); vhs.uniforms.res.value.set(W, H);
+  cam.aspect = W / H;
+  const tall = H / W, hfov = (46 - (tall - 1) * 14) * Math.PI / 180;   // 縦長ほど寄せて、塊が横いっぱいに育つように
+  cam.fov = 2 * Math.atan(Math.tan(hfov / 2) / cam.aspect) * 180 / Math.PI;
+  CAMR = 6.5 * (1 + (tall - 1) * 0.45);   // 縦長は寄っているぶんカメラを引く（真ん中が白く飛ばないように）
+  cam.updateProjectionMatrix();
+};
+
+const now = () => ac ? ac.currentTime - T0 : 0;
+const frame = () => {
+  requestAnimationFrame(frame);
+  const t = Math.max(0, now());
+  if (t < simT - 0.5) reset();
+  for (let n = 0; simT <= t; n++) { if (n >= 4) { simT = t + DT; break; } stepSim(); }   // 重くて追いつかないときは飛ばす（固まらないように）
+  writeAll(); cubes.instanceMatrix.needsUpdate = true;   // 毎コマ全部を送る（約4MB）
+  const ca = t * 0.12;   // カメラは中心のまわりをゆっくり回る
+  cam.position.set(Math.sin(ca) * CAMR, 0.8 * Math.sin(t * 0.07), Math.cos(ca) * CAMR); cam.lookAt(0, 0, 0);
+  const kick = Math.exp(-((t % BEAT) / BEAT) * 6), barN = Math.floor(t / (BEAT * 4));
+  bloom.strength = (0.95 + 0.6 * kick) * (1 - 0.5 * Math.min(1, N / 25000));   // 光はキックで脈打つ。立方体が多いほど弱めて、重なって白く飛ばないように
+  vhs.uniforms.time.value = t; vhs.uniforms.kick.value = kick;
+  vhs.uniforms.burst.value = barN % 4 === 3 && (t / BEAT) % 4 > 3 ? 1 : 0;   // 4小節目の最後の拍は大きく乱れる
+  cam.zoom = 1 + 0.05 * kick; cam.updateProjectionMatrix();   // キックで少し寄る
+  composer.render();
+};
+
+// ---- 音：Donato Dozzy のような催眠的なテクノ（127 BPM）をダブ寄りに。裏拍の Fm7 のダブのコードを、揺れてこもるテープのようなディレイで何度も返す。丸く深いキックに暗い残響の唸り、F の1音を中心にした短い音型を
+// 3拍の長さでループさせて4つ打ちとずらし、共鳴の強いフィルターを何小節もかけて開け閉めする。揺れのあるハット、シェイカー、まばらなタム、低いドローン。
+// 絵はキックに合わせて芽を出し、光とVHSの乱れを脈打たせる
+const BPM = 127, BEAT = 60 / BPM, SIX = BEAT / 4;
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+const LOOP = [41, 53, 48, 51, 41, 56, 53, 48, 44, 51, 41, 60];   // F を中心にした音型（12個＝3拍）
+let ac = null, out, comp, duck, audioDest, T0 = 0, schedId, noiseBuf, step16 = 0, srnd = 1, delayIn, verbIn, rumbleIn;
+const arnd = () => (srnd = (srnd * 16807) % 2147483647) / 2147483647;
+const startAudio = () => {
+  if (ac) return;
+  ac = new AudioContext();
+  const sr = ac.sampleRate;
+  out = ac.createGain(); out.gain.value = 0.75;
+  comp = ac.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4; comp.attack.value = 0.005; comp.release.value = 0.2;
+  out.connect(comp); comp.connect(ac.destination);
+  audioDest = ac.createMediaStreamDestination(); comp.connect(audioDest);
+  duck = ac.createGain(); duck.connect(out);   // キックで少し沈ませる側
+  noiseBuf = ac.createBuffer(1, sr * 2, sr);
+  const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  const mkIR = (sec, pw) => { const ir = ac.createBuffer(2, sr * sec, sr); for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, pw); } return ir; };
+  // 残響（広い）
+  const verb = ac.createConvolver(); verb.buffer = mkIR(5, 2.2); verbIn = ac.createGain(); verbIn.gain.value = 0.55; verbIn.connect(verb); verb.connect(duck);
+  // キックの唸り：キックを長い残響に通し、低いところだけ残す
+  const rv = ac.createConvolver(), rl = ac.createBiquadFilter(), rg = ac.createGain();
+  rv.buffer = mkIR(2.5, 1.5); rl.type = 'lowpass'; rl.frequency.value = 160; rg.gain.value = 1.3;
+  rumbleIn = ac.createGain(); rumbleIn.connect(rv); rv.connect(rl); rl.connect(rg); rg.connect(duck);
+  // 付点8分のディレイ（左右に揺れる）
+  // テープのようなディレイ：遅れ時間をゆっくり揺らし、返るたびに高域と低域を削ってこもらせる。左右で長さを変える
+  delayIn = ac.createGain(); delayIn.gain.value = 0.4;
+  [[SIX * 3, -0.5], [SIX * 4, 0.5]].forEach(([dt, pn], i) => {
+    const dl = ac.createDelay(2), fb = ac.createGain(), lp = ac.createBiquadFilter(), hp = ac.createBiquadFilter(), sat = ac.createWaveShaper(), pan = ac.createStereoPanner();
+    const wob = ac.createOscillator(), wg = ac.createGain();
+    dl.delayTime.value = dt; wob.frequency.value = 0.23 + i * 0.11; wg.gain.value = 0.0025; wob.connect(wg); wg.connect(dl.delayTime); wob.start();
+    fb.gain.value = 0.5; lp.type = 'lowpass'; lp.frequency.value = 1700; hp.type = 'highpass'; hp.frequency.value = 220;
+    const cv = new Float32Array(256); for (let k = 0; k < 256; k++) { const x = k / 128 - 1; cv[k] = Math.tanh(x * 1.6) / 1.6; } sat.curve = cv;   // 小さな音は持ち上げない（1周で大きくならない）
+    pan.pan.value = pn;
+    delayIn.connect(dl); dl.connect(lp); lp.connect(hp); hp.connect(sat); sat.connect(fb); fb.connect(dl); sat.connect(pan); pan.connect(duck); pan.connect(verbIn);
+  });
+  // ドローン：F の低いサインと5度、ゆっくり息づく
+  [[29, 0.16], [36, 0.08], [41, 0.05]].forEach(([m, v], i) => {
+    const o = ac.createOscillator(), g = ac.createGain(), l = ac.createOscillator(), lg = ac.createGain();
+    o.frequency.value = mtof(m); g.gain.value = v; l.frequency.value = 0.05 + i * 0.03; lg.gain.value = v * 0.6;
+    l.connect(lg); lg.connect(g.gain); o.connect(g); g.connect(duck); o.start(); l.start();
+  });
+  T0 = ac.currentTime + 0.05; step16 = 0; srnd = 1;
+  clearInterval(schedId);
+  schedId = setInterval(() => {
+    while (T0 + step16 * SIX < ac.currentTime + 0.3) { playStep(step16, T0 + step16 * SIX); step16++; }
+  }, 25);
+};
+const env = (g, at, a, peak, d) => { g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(peak, at + a); g.gain.exponentialRampToValueAtTime(0.0008, at + a + d); };
+const noise = (at, dur, type, freq, q, peak, d, dest = out) => {
+  const n = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+  n.buffer = noiseBuf; f.type = type; f.frequency.value = freq; f.Q.value = q; env(g, at, 0.001, peak, d);
+  n.connect(f); f.connect(g); g.connect(dest); n.start(at, arnd(), dur); };
+const playStep = (n, at) => {
+  const pos = n % 16, bar = Math.floor(n / 16);
+  const sw = pos % 2 ? SIX * 0.12 : 0;   // 裏の16分を少し遅らせて揺らす
+  if (pos % 4 === 0) {
+    // キック：丸く深く、唸りへも送る
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.frequency.setValueAtTime(90, at); o.frequency.exponentialRampToValueAtTime(42, at + 0.11);
+    env(g, at, 0.006, 0.85, 0.5); o.connect(g); g.connect(out); g.connect(rumbleIn); o.start(at); o.stop(at + 0.5);
+    duck.gain.cancelScheduledValues(at); duck.gain.setValueAtTime(0.55, at); duck.gain.linearRampToValueAtTime(1, at + BEAT * 0.7);
+  }
+  // ハット：16分、強弱をつけて揺らす。裏拍は少し開く
+  const hv = [0.05, 0.02, 0.09, 0.03][pos % 4] * (0.7 + 0.6 * arnd());
+  noise(at + sw, 0.04, 'highpass', 9000, 0.7, hv, pos % 4 === 2 ? 0.06 : 0.02);
+  // シェイカー：8分の裏、帯域を狭く
+  if (pos % 2 === 1) noise(at + sw, 0.06, 'bandpass', 6000, 2, 0.035, 0.04);
+  // タム：3の倍数の16分で、ときどき（音程は F の上で揺らす）
+  if (n % 3 === 0 && arnd() < 0.35) {
+    const o = ac.createOscillator(), g = ac.createGain(), p = ac.createStereoPanner();
+    const fq = mtof([53, 56, 60][Math.floor(arnd() * 3)]) / 2;
+    o.frequency.setValueAtTime(fq * 1.5, at + sw); o.frequency.exponentialRampToValueAtTime(fq, at + sw + 0.06);
+    p.pan.value = arnd() * 1.2 - 0.6; env(g, at + sw, 0.002, 0.13, 0.22); o.connect(g); g.connect(p); p.connect(duck); p.connect(verbIn); o.start(at + sw); o.stop(at + sw + 0.3);
+  }
+  // ダブのコード：Fm7 の短い和音を裏拍で。ほとんどディレイと残響に送り、こもったフィルターを小節ごとに少しずつ動かす
+  if (pos === 2 || pos === 10 || (pos === 14 && arnd() < 0.3)) {
+    const f = ac.createBiquadFilter(), g = ac.createGain(), hp = ac.createBiquadFilter();
+    f.type = 'lowpass'; f.Q.value = 3; f.frequency.value = 700 + 600 * (0.5 + 0.5 * Math.sin(bar * 0.35));
+    hp.type = 'highpass'; hp.frequency.value = 180;
+    env(g, at + sw, 0.004, 0.16, 0.13); f.connect(hp); hp.connect(g); g.connect(duck); g.connect(delayIn); g.connect(verbIn);
+    for (const mm of [53, 56, 60, 63]) for (const det of [-8, 8]) {
+      const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(mm); o.detune.value = det;
+      o.connect(f); o.start(at + sw); o.stop(at + sw + 0.25);
+    }
+  }
+  // 音型：12個（3拍）でループし、4つ打ちとずれていく。共鳴フィルターは32小節かけてゆっくり開け閉め
+  const m = LOOP[n % LOOP.length];
+  if (n % LOOP.length !== 5 && n % LOOP.length !== 9) {   // ところどころ休む
+    const o = ac.createOscillator(), o2 = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain();
+    o.type = 'sawtooth'; o2.type = 'square'; o.frequency.value = mtof(m); o2.frequency.value = mtof(m) * 1.003;
+    const cut = 300 + 1100 * (0.5 - 0.5 * Math.cos(n / (16 * 32) * 6.283)) + 500 * (0.5 + 0.5 * Math.sin(n * 0.21));
+    f.type = 'lowpass'; f.Q.value = 14; f.frequency.setValueAtTime(cut * 2.2, at); f.frequency.exponentialRampToValueAtTime(cut, at + SIX * 0.8);
+    env(g, at, 0.003, 0.055, SIX * 1.6); o.connect(f); o2.connect(f); f.connect(g); g.connect(duck); g.connect(delayIn); o.start(at); o2.start(at); o.stop(at + SIX * 2); o2.stop(at + SIX * 2);
+  }
+};
+
+setSize(); frame();
+document.getElementById('aspect').onchange = setSize;
+document.getElementById('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+
+document.getElementById('rec').onclick = e => {
+  if (ac) { ac.close(); ac = null; }   // 頭から録る
+  startAudio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `sprout_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+window.piece = { output: () => comp };
+</script>
+</body>
+</html>
