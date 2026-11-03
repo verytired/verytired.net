@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Melt</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="15"></label>
+  <button id="rec">● 録画して保存</button>
+  <label><input type="checkbox" id="flow" checked> 溶けて流れる（外すと色の付け替えだけ。URL に ?flow=0 でも）</label>
+</div>
+
+<script>
+// 退廃的な音（64 BPM、15秒のループ＝4小節）に合わせて、70年代の文庫の装画のような色にした女性の写真8枚を切り替える。
+// 顔は鼻筋で半分に割り、片側と頭の上が液体のように溶けて、拍とは関係なく下へ垂れ続ける
+const BPM = 64, BEAT = 60 / BPM, BAR = 4 * BEAT, LOOP = 4 * BAR;   // LOOP = 15秒ちょうど
+const NIMG = 8, IMGS = Array.from({ length: NIMG }, (_, i) => `src/woman${i + 1}_paint.jpg`);
+
+// ---- 譜面 ----
+// 和音は Am → F → Dm → E7 で、ベースが A→G→F→E と沈む（ラメント）。小節の頭にキックの心音、3拍目に遠いスネア。
+// オルゴールは A のハーモニック・マイナーから、まばらに
+const CH = [[57, [0, 3, 7, 14]], [53, [4, 7, 11, 16]], [50, [3, 7, 10, 15]], [52, [0, 4, 10, 13]]];   // 和音の根音（MIDI）と構成音（根音からの半音）：Am(9) F/A Dm/F E7(♭9)
+const BASS = [45, 43, 41, 40];   // A G F E
+const MEL = [[0, 76], [1.5, 72], [2.5, 71], [4, 77], [5.5, 76], [7, 74], [8, 74], [9.5, 72], [10.5, 69], [12, 71], [13, 68], [14.5, 64]];   // [拍, 音]
+const EV = [];
+for (let bar = 0; bar < 4; bar++) {
+  const B = bar * BAR;
+  EV.push({ t: B, type: 'pad', bar }, { t: B, type: 'bass', n: BASS[bar] });
+  EV.push({ t: B, type: 'kick', v: 1 }, { t: B + BEAT * .32, type: 'kick', v: .6 });   // ドクッ・ドクン
+  EV.push({ t: B + 2 * BEAT, type: 'snare' });
+  if (bar === 3) EV.push({ t: B + 3.5 * BEAT, type: 'kick', v: .5 });
+}
+for (const [b, n] of MEL) EV.push({ t: b * BEAT, type: 'box', n });
+EV.sort((a, b) => a.t - b.t);
+
+// ---- 音 ----
+let ac = null, t0 = 0, out, verb, dly, wow, noiseBuf, nextEv = 0, loopN = 0;
+function audio() {
+  if (ac) { ac.resume(); return; }
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -18; comp.ratio.value = 3;
+  const tone = ac.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 6500;   // 古いテープのように上を丸める
+  out = ac.createGain(); out.gain.value = 0.8; const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 35;   // 聞こえない最低域を切る
+  out.connect(tone); tone.connect(hp); hp.connect(comp); comp.connect(ac.destination);
+  window.audioDest = ac.createMediaStreamDestination ? ac.createMediaStreamDestination() : null;
+  if (audioDest) comp.connect(audioDest);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  // 長く暗い残響（5秒）
+  const L = ac.sampleRate * 5, ir = ac.createBuffer(2, L, ac.sampleRate);
+  for (let ch = 0; ch < 2; ch++) { const x = ir.getChannelData(ch); let lp = 0; for (let i = 0; i < L; i++) { lp += ((Math.random() * 2 - 1) - lp) * .25; x[i] = lp * Math.pow(1 - i / L, 3); } }
+  verb = ac.createConvolver(); verb.buffer = ir; const vg = ac.createGain(); vg.gain.value = 0.7; verb.connect(vg); vg.connect(out);
+  dly = ac.createDelay(2); dly.delayTime.value = BEAT * .75; const fb = ac.createGain(); fb.gain.value = .45; const df = ac.createBiquadFilter(); df.type = 'lowpass'; df.frequency.value = 2200;
+  dly.connect(df); df.connect(fb); fb.connect(dly); df.connect(verb); const dg = ac.createGain(); dg.gain.value = .3; df.connect(dg); dg.connect(out);
+  // テープのよれ：ゆっくりのワウと細かいフラッターを、全部の音程（detune）に1本でつなぐ
+  wow = ac.createConstantSource(); wow.offset.value = 0; wow.start();
+  for (const [f, a] of [[.45, 16], [5.8, 3]]) { const o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = f; g.gain.value = a; o.connect(g); g.connect(wow.offset); o.start(); }
+  // レコードのヒスとプチプチ
+  const hs = noise(ac.currentTime, 1e5), hf = ac.createBiquadFilter(), hg = ac.createGain(); hf.type = 'bandpass'; hf.frequency.value = 3000; hf.Q.value = .5; hg.gain.value = .025; hs.connect(hf); hf.connect(hg); hg.connect(out);
+  const cl = ac.createBuffer(1, ac.sampleRate * 4, ac.sampleRate), cd = cl.getChannelData(0);
+  for (let i = 0; i < 90; i++) { const p = Math.floor(Math.random() * cd.length), a = (Math.random() * .6 + .2) * (Math.random() < .5 ? -1 : 1); for (let k = 0; k < 40 && p + k < cd.length; k++) cd[p + k] += a * Math.exp(-k / 6); }
+  const cs = ac.createBufferSource(); cs.buffer = cl; cs.loop = true; const cg = ac.createGain(); cg.gain.value = .12; cs.connect(cg); cg.connect(out); cs.start();
+  t0 = ac.currentTime + 0.05; nextEv = 0; loopN = 0;
+  setInterval(schedule, 25); schedule();
+}
+function schedule() {   // 0.2秒先まで鳴らしておく
+  for (;;) {
+    if (nextEv >= EV.length) { nextEv = 0; loopN++; }
+    const e = EV[nextEv], t = t0 + loopN * LOOP + e.t;
+    if (t > ac.currentTime + 0.2) break;
+    nextEv++;
+    if (t < ac.currentTime - 0.05) continue;
+    ({ kick, snare, pad, bass, box })[e.type](t, e);
+  }
+}
+const mtof = n => 440 * 2 ** ((n - 69) / 12);
+function noise(t, len) { const n = ac.createBufferSource(); n.buffer = noiseBuf; n.loop = true; n.start(t, Math.random()); n.stop(t + len); return n; }
+function osc(type, n, t, len, dt = 0) { const o = ac.createOscillator(); o.type = type; o.frequency.value = mtof(n); o.detune.value = dt; wow.connect(o.detune); o.start(t); o.stop(t + len); return o; }
+function kick(t, e) {   // 心音のような、低く鈍いキック
+  const o = ac.createOscillator(), g = ac.createGain(), f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 180;
+  o.frequency.setValueAtTime(70, t); o.frequency.exponentialRampToValueAtTime(38, t + .15);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(e.v, t + .008); g.gain.exponentialRampToValueAtTime(.001, t + .5);
+  o.connect(f); f.connect(g); g.connect(out); o.start(t); o.stop(t + .55);
+}
+function snare(t) {   // 遠くで鳴るスネア：ほとんど残響だけ
+  const n = noise(t, .3), f = ac.createBiquadFilter(), g = ac.createGain(), s = ac.createGain(); f.type = 'bandpass'; f.frequency.value = 1400; f.Q.value = .8;
+  g.gain.setValueAtTime(.18, t); g.gain.exponentialRampToValueAtTime(.001, t + .25); s.gain.value = 2.2;
+  n.connect(f); f.connect(g); g.connect(out); g.connect(s); s.connect(verb);
+}
+function pad(t, e) {   // 和音：少しずつずらしたノコギリをこもらせ、ゆっくり膨らんで消える
+  const [r, iv] = CH[e.bar], len = BAR + 1.5, f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'lowpass'; f.Q.value = 2; f.frequency.setValueAtTime(400, t); f.frequency.linearRampToValueAtTime(1300, t + BAR * .6); f.frequency.linearRampToValueAtTime(500, t + len);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.07, t + 1.2); g.gain.setValueAtTime(.07, t + BAR - .3); g.gain.linearRampToValueAtTime(0, t + len);
+  f.connect(g); g.connect(out); g.connect(verb);
+  for (const i of iv) for (const dt of [-9, 8]) osc('sawtooth', r + i, t, len, dt).connect(f);
+}
+function bass(t, e) {   // 沈んでいくベース：丸い三角波
+  const g = ac.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.11, t + .05); g.gain.setTargetAtTime(.0001, t + BAR * .8, .3);
+  osc('triangle', e.n, t, BAR + 1).connect(g); g.connect(out);
+}
+function box(t, e) {   // 音程の狂ったオルゴール：高い倍音の FM を短く
+  const car = osc('sine', e.n, t, 2.5, (Math.random() - .5) * 40), mod = ac.createOscillator(), mg = ac.createGain(), g = ac.createGain(), fq = mtof(e.n);
+  mod.frequency.value = fq * 5.02; mg.gain.setValueAtTime(fq * 1.5, t); mg.gain.exponentialRampToValueAtTime(fq * .05, t + .8);
+  mod.connect(mg); mg.connect(car.frequency); mod.start(t); mod.stop(t + 2.5);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.07, t + .004); g.gain.exponentialRampToValueAtTime(.001, t + 2.4);
+  car.connect(g); g.connect(out); g.connect(dly);
+}
+
+// ---- 映像 ----
+const c = document.getElementById('c');
+const gl = c.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+const VS = `#version 300 es
+void main() { vec2 p = vec2((gl_VertexID & 1) * 4 - 1, (gl_VertexID & 2) * 2 - 1); gl_Position = vec4(p, 0, 1); }`;
+const FS = `#version 300 es
+precision highp float;
+uniform highp sampler2DArray img; uniform vec2 res; uniform float iw, ih, ft, cur, t;
+uniform vec2 fTop[8], fNose[8]; uniform float fW[8];   // 写真ごとの顔：額・鼻先・顔の半分の幅
+uniform float side, wS, wA, d2, nL, sz, flen, sat, edgeK, dlen, flowOn;   // dlen：垂れる筋の長さ、flowOn：0 で溶かさない
+uniform vec3 gSh, gMid, gHi;   // 色の付け替え：暗い所・中間・明るい所の色（区間ごと）   // 区間ごとに変える：溶かす側・上の溶け口の高さ・うねりの大きさと強さ・細かさ・塗り分けの段数・範囲の広さ・色（4色＋縁）
+out vec4 o;
+float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
+  float a = fract(sin(dot(i, vec2(127.1, 311.7))) * 43758.5), b = fract(sin(dot(i + vec2(1, 0), vec2(127.1, 311.7))) * 43758.5),
+        c = fract(sin(dot(i + vec2(0, 1), vec2(127.1, 311.7))) * 43758.5), d = fract(sin(dot(i + vec2(1, 1), vec2(127.1, 311.7))) * 43758.5);
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y); }
+float fbm(vec2 p) { float s = 0., a = .5; for (int i = 0; i < 4; i++) { s += a * vn(p); p = p * 2.03 + 7.1; a *= .5; } return s; }
+vec2 cover(vec2 q) {   // 画面の 0..1（上が 0）→ 写真の 0..1。真ん中で切り抜いて合わせる
+  float s = max(res.x / iw, res.y / ih); return (q - .5) * res / (vec2(iw, ih) * s) + .5; }
+// 溶ける：頭から上だけを、ずらした雑音で流し、明るさを4段に塗り分けて境目に青緑の線を引く
+// 溶かす所：顔の鼻筋で左右に割り、片側の半分だけ（頭の上からあごの下の首まで）を溶かす
+const vec2 K = vec2(1, 16. / 9.);   // 写真は縦長なので、縦を横と同じ目盛りに直して測る
+float maskAt(vec2 uv, int fi) {
+  float nz = fbm(uv * 4. + ft * .5) - .5;
+  vec2 a = fTop[fi] * K, dir = fNose[fi] * K - a; float L2 = length(dir); dir /= L2;
+  vec2 v = uv * K - a; float along = dot(v, dir) / L2, across = (v.x * dir.y - v.y * dir.x) / fW[fi];   // along：額 0・鼻先 1、across：顔の半分の幅で 1（負が画面の左）
+  float hd = length(vec2(across / (2.6 * sz), (along - .6) / (1.9 * sz))) + .5 * nz;
+  float left = smoothstep(.08, -.12, side * across + .35 * nz) * smoothstep(3.4, 2.6, along);
+  return smoothstep(1.05, .7, hd) * left;
+}
+vec3 melted(vec2 q, float layer) {
+  vec2 uv = cover(q); int fi = int(layer + .5);
+  float m = maskAt(uv, fi) * flowOn;
+  // 垂れる：列ごとに長さの違う筋を、溶けた所から下へ伸ばす（上の何点かが溶けていれば、その下も垂れた中に入る）
+  float cv = vn(vec2(uv.x * 11., 1.7)) * .7 + vn(vec2(uv.x * 29., 5.3)) * .3,   // 列ごとの垂れる量（なめらかに変わる）
+        dl = dlen * sz * cv * cv * 2.2;
+  for (int i = 1; i <= 4; i++) m = max(m, maskAt(uv - vec2(0, dl * float(i) * .25), fi) * (1. - .15 * float(i)) * flowOn);
+  vec2 w = vec2(fbm(uv * wS + vec2(ft * .3, 0)), fbm(uv * wS + vec2(5.2, 1.3) - ft * .3)) - .5;
+  vec2 w2 = vec2(fbm(uv * 5. + w * 3. + ft * .2), fbm(uv * 5. - w * 3. + 9.)) - .5;
+  // 垂れる：上の絵を真下へ運ぶ（フローマップ）。列ごとに速さが違う。
+  // 運ぶ距離は時間で伸び、伸びきったら戻る。半周ずらした2つを重ねて、戻る所を見せない
+  vec2 fl = vec2(0, 1) * (.15 + 2.4 * cv * cv);
+  fl.y /= K.y;
+  float p1 = fract(ft), p2 = fract(ft + .5), g1 = 1. - abs(2. * p1 - 1.);
+  vec2 base = uv + w2 * d2 * m;
+  vec2 uA = base - fl * p1 * flen * m + w * wA * m, uB = base - fl * p2 * flen * m + w * wA * m;
+  vec3 col = texture(img, vec3(uv, layer)).rgb;
+  vec3 cf = mix(texture(img, vec3(uB, layer)).rgb, texture(img, vec3(uA, layer)).rgb, g1);   // 運ばれてきた写真の色
+  float Lc = dot(cf, vec3(.3, .55, .15));
+  vec2 u2 = mix(uB, uA, g1);
+  float L = Lc * 1.25 + (fbm(u2 * 9.) - .5) * .15 + (fbm(u2 * 5. + w2 * 4.) - .5) * .7 * m;   // 一色の背景にもマーブル模様を出す
+  float q4 = clamp(L * nL, 0., nL - .001), fr = fract(q4), lv = floor(q4) + smoothstep(.3, .7, fr) - .5;   // 段の境目はぼかして、エアブラシの帯にする
+  // 色は写真のその場所の色相のまま、明るさだけを段に切る（べた塗りの等高線）。彩度は区間ごとに上げ下げ
+  vec3 pc = cf * ((lv + .5) / nL / 1.25 / max(Lc, .03));
+  pc = mix(vec3(dot(pc, vec3(.3, .55, .15))), pc, sat);
+  float edge = smoothstep(.05, .0, min(fr, 1. - fr));
+  pc = mix(pc, pc * 1.6 + .2, edge * edgeK);   // 段の境目に、同じ色を明るくした線
+  return mix(col, pc, smoothstep(.25, .6, m));
+}
+void main() {
+  vec2 p = gl_FragCoord.xy, q = vec2(p.x / res.x, 1. - p.y / res.y);
+  vec3 col = melted(q, cur);
+  // 70年代の文庫の装画のような色：暗い所は黒に沈め、中間をその区間の1色（黄緑・青紫・水色・黄・ピンク・赤）で染め、明るい所は淡い白へ。唇の赤だけは元の赤を残す
+  float Y = dot(col, vec3(.3, .55, .15)); Y = mix(Y, smoothstep(.04, .9, Y), .4);   // 明暗を S 字に：陰は深く、明るい所はもっと白く
+  vec3 gm = Y < .45 ? mix(gSh, gMid, smoothstep(.06, .45, Y)) : mix(gMid, gHi, smoothstep(.45, .9, Y));
+  float red = smoothstep(.04, .16, col.r - max(col.g, col.b)) * smoothstep(.08, .2, col.r);   // 青い光の写真は唇の赤が弱いので、ゆるめに拾う
+  col = mix(mix(gm, col, .18), col * vec3(1.6, .75, .75) + vec3(.12, 0, .01), red);   // 唇は明るく鮮やかな赤に
+  float glow = max(dot(textureLod(img, vec3(cover(q), cur), 5.).rgb, vec3(.3, .55, .15)) - .45, 0.);   // ぼかした写真の明るい所を、明るい所の色でにじませる（エアブラシのハレーション）
+  col += gHi * glow * .5;
+  vec2 vg = (q - vec2(.5, .42)) * vec2(1, .8); col *= 1. - smoothstep(.22, .62, length(vg)) * .85;   // 周りを黒く落とす
+  float g = fract(sin(dot(p + t * 61., vec2(12.9898, 78.233))) * 43758.5453);
+  col += (g - .5) * .05;   // 粒子
+  o = vec4(clamp(col, 0., 1.), 1);
+}`;
+function prog() {
+  const p = gl.createProgram();
+  for (const [ty, src] of [[gl.VERTEX_SHADER, VS], [gl.FRAGMENT_SHADER, FS]]) {
+    const sh = gl.createShader(ty); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(p, sh);
+  }
+  gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const loc = {}; p.u = n => n in loc ? loc[n] : (loc[n] = gl.getUniformLocation(p, n));
+  return p;
+}
+const P = prog();
+// 写真8枚：大きさを揃えて1つの配列テクスチャに入れる
+const IW = 720, IH = 1280, tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 11, gl.RGBA8, IW, IH, NIMG);   // ミップマップ：ぼかした写真を光のにじみに使う
+gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D_ARRAY, k, gl.MIRRORED_REPEAT);
+let loaded = 0; const have = [];   // 読み込めた写真の番号。無い写真は飛ばす
+window.ready = () => loaded === NIMG;   // 書き出しは写真が全部そろうまで待つ（--ready "() => ready()"）
+const cv = document.createElement('canvas'); cv.width = IW; cv.height = IH; const cx = cv.getContext('2d');
+IMGS.forEach((src, i) => {
+  const im = new Image(); im.onload = () => {
+    const s = Math.max(IW / im.width, IH / im.height); cx.drawImage(im, (IW - im.width * s) / 2, (IH - im.height * s) / 2, im.width * s, im.height * s);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, IW, IH, 1, gl.RGBA, gl.UNSIGNED_BYTE, cv); gl.generateMipmap(gl.TEXTURE_2D_ARRAY); loaded++; have.push(i); have.sort((a, b) => a - b);
+  }; im.src = src;
+});
+let W, H;
+function setSize() { [W, H] = document.getElementById('aspect').value.split('x').map(Number); c.width = W; c.height = H; }
+
+// 写真ごとの顔の目印（MediaPipe FaceLandmarker で 720x1280 の切り抜きを測った値。0..1、上が 0。測り方は README）
+const FACES = [{"top": [0.458, 0.307], "nose": [0.5, 0.469], "cheekL": [0.301, 0.45], "cheekR": [0.752, 0.399]}, {"top": [0.506, 0.346], "nose": [0.512, 0.547], "cheekL": [0.266, 0.469], "cheekR": [0.763, 0.468]}, {"top": [0.517, 0.211], "nose": [0.509, 0.464], "cheekL": [0.179, 0.418], "cheekR": [0.844, 0.421]}, {"top": [0.553, 0.314], "nose": [0.583, 0.43], "cheekL": [0.374, 0.446], "cheekR": [0.763, 0.411]}, {"top": [0.464, 0.328], "nose": [0.391, 0.425], "cheekL": [0.394, 0.399], "cheekR": [0.642, 0.436]}, {"top": [0.482, 0.316], "nose": [0.51, 0.436], "cheekL": [0.308, 0.458], "cheekR": [0.715, 0.433]}, {"top": [0.536, 0.411], "nose": [0.454, 0.571], "cheekL": [0.306, 0.53], "cheekR": [0.763, 0.579]}, {"top": [0.624, 0.344], "nose": [0.752, 0.49], "cheekL": [0.362, 0.522], "cheekR": [0.729, 0.465]}];
+const fTop = FACES.flatMap(f => f.top), fNose = FACES.flatMap(f => f.nose);
+const fW = FACES.map(f => Math.hypot(f.cheekR[0] - f.cheekL[0], (f.cheekR[1] - f.cheekL[1]) * 16 / 9) / 2);
+// ---- 区間ごとの変化：切り替えの長さ（拍）・順番・溶け方・彩度。ループごとに引き直す（最初のループだけ並びは写真の順）
+// 色は区間ごとに色相から作る：暗い所はほぼ黒、中間は妖しい色、明るい所は白っぽい
+const hsl = (h, S, l) => { const f = n => { const k = (n + h / 30) % 12; return l - S * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1)); }; return [f(0), f(8), f(4)]; };
+const grade = (h, r) => [hsl(h + 60 * (r() - .5), .8, .03), hsl(h, .6 + .3 * r(), .38 + .15 * r()), hsl(h + 50 * (r() - .5), .5 + .4 * r(), .86 + .08 * r())];
+const SEG0 = [2, 1, 1, 4, 2, 2, 1, 3];   // 合わせて16拍＝1ループ
+function rng(a) { return () => { a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const shuffle = (xs, r) => { xs = xs.slice(); for (let i = xs.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [xs[i], xs[j]] = [xs[j], xs[i]]; } return xs; };
+const plans = {};
+function plan(L) {
+  if (plans[L]) return plans[L];
+  const r = rng(L * 7919 + 13), first = L === 0;
+  const segs = first ? SEG0 : shuffle(SEG0, r), order = first ? [0, 1, 2, 3, 4, 5, 6, 7] : shuffle([0, 1, 2, 3, 4, 5, 6, 7], r);
+  let h = 360 * r(); const gs = segs.map(() => grade(h = (h + 60 + 240 * r()) % 360, r));   // 前の区間から 60〜300° 離して似た色が続かないように
+  const prm = segs.map((_, i) => ({
+    side: r() < .5 ? 1 : -1,   // どちらの半分を溶かすか（人が替わるたびに選ぶ）
+    wS: 1.6 + 2.6 * r(), wA: .05 + .11 * r(), d2: .02 + .05 * r(),   // 流れは控えめ：顔の脇で煙のように揺れる程度
+    nL: 3 + Math.floor(r() * 5), flen: .1 + .18 * r(), dlen: .1 + .14 * r(),   // 流れて運ばれる距離、垂れる筋の長さ
+     sz: .8 + .3 * r(), sp: .1 + .45 * r(), sat: 1 + .9 * r(), grade: gs[i], edgeK: r() < .3 ? 0 : .5 + .5 * r(),   // 彩度、縁の線の強さ（3割は線なし）
+  }));
+  return plans[L] = { segs, order, prm };
+}
+const pick = b => have.length ? have[b % have.length] : 0;
+if (location.protocol === 'file:') alert('写真を読むには、サーバーを立てて http://localhost から開いてください（python3 -m http.server）');
+const flowEl = document.getElementById('flow'); if (new URLSearchParams(location.search).get('flow') === '0') flowEl.checked = false;
+function frame() {
+  requestAnimationFrame(frame);
+  const tl = ac ? Math.max(0, ac.currentTime - t0) % LOOP : (performance.now() / 1000) % LOOP;
+  const pl = plan(ac ? Math.floor(Math.max(0, ac.currentTime - t0) / LOOP) : Math.floor(performance.now() / 1000 / LOOP));
+  let si = 0, s0 = 0; while (si < 7 && tl >= (s0 + pl.segs[si]) * BEAT) s0 += pl.segs[si++];   // 今の区間
+  const pr = pl.prm[si];
+  gl.viewport(0, 0, W, H); gl.useProgram(P);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex); gl.uniform1i(P.u('img'), 0);
+  gl.uniform2f(P.u('res'), W, H);
+  // 溶ける流れは拍に合わせず、ずっと同じ速さで流れ続ける
+  for (const [k, x] of Object.entries({ iw: IW, ih: IH, ft: (tl - s0 * BEAT) * pr.sp + si * 3, cur: pick(pl.order[si]), t: tl, side: pr.side, wS: pr.wS, wA: pr.wA, d2: pr.d2, nL: pr.nL, sz: pr.sz, flen: pr.flen, dlen: pr.dlen, sat: pr.sat, edgeK: pr.edgeK, flowOn: flowEl.checked ? 1 : 0 })) gl.uniform1f(P.u(k), x);
+  gl.uniform2fv(P.u('fTop'), fTop); gl.uniform2fv(P.u('fNose'), fNose); gl.uniform1fv(P.u('fW'), fW);
+  const gr = pr.grade; gl.uniform3fv(P.u('gSh'), gr[0]); gl.uniform3fv(P.u('gMid'), gr[1]); gl.uniform3fv(P.u('gHi'), gr[2]);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+document.getElementById('aspect').onchange = setSize; setSize();
+requestAnimationFrame(frame);
+document.getElementById('play').onclick = audio;
+c.onpointerdown = audio;
+
+document.getElementById('rec').onclick = e => {
+  audio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `melt_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+</script>
+</body>
+</html>
