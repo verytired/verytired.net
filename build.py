@@ -142,8 +142,7 @@ def tools():
 
 
 def main():
-    hold = set((OUT / "hold.txt").read_text().split()) if (OUT / "hold.txt").exists() else set()  # まだ出さない作品（hitori_av のフォルダ名）
-    dirs = sorted(d for d in SRC.iterdir() if d.is_dir() and re.match(r"\d{3}_", d.name) and d.name not in hold)  # 通し番号（NNN_名前）の順
+    dirs = sorted(d for d in SRC.iterdir() if d.is_dir() and re.match(r"\d{3}_", d.name))  # 通し番号（NNN_名前）の順。番号のないフォルダは下書きなので出さない
     for old in LAB.glob("*") if LAB.exists() else []:
         if old.name not in {d.name.split("_", 1)[1] for d in dirs}:
             shutil.rmtree(old)  # 名前を変えた・フォルダを消した場合の残骸

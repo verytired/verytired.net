@@ -1,6 +1,6 @@
 # verytired.net
 
-Static site for [verytired.net](https://verytired.net). It is built from the audiovisual pieces in `../hitori_av` (one folder per piece, `NNN_name/`).
+Static site for [verytired.net](https://verytired.net). It is built from the audiovisual pieces in `../hitori_av` (one folder per piece, `NNN_name/`; folders without a number are drafts and stay off the site — the number is added when a piece is published).
 
 ## Usage
 
@@ -30,7 +30,6 @@ Pages use `template.html`; the piece player is `player.html`.
 | `youtube.tsv` | `folder<TAB>YouTube URL` — adds a YouTube link to that piece's player |
 | `music.tsv` | `title<TAB>URL` — YouTube URL, or the `src` of a Bandcamp embed |
 | `tools.tsv` | `name<TAB>description<TAB>play URL<TAB>GitHub URL<TAB>video URL (optional)`; image at `tools/<name>.jpg` |
-| `hold.txt` | Folder names to keep off the site for now |
 
 ## Scripts
 
