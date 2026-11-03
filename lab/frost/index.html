@@ -53,12 +53,12 @@
 </div>
 <script>
 // 作品（piece.html）は hitori_av の HTML そのまま。#panel を隠し、中のボタンをこのバーから押す
+// 作品の中身は window.piece = { ready, media, output } だけを見る（hitori_av の README「作品側の決まり」）
 const stage = document.getElementById('stage'), $ = id => document.getElementById(id);
 // 状態: 読み込み中（Play を押せない）→ 押せる → 再生（素材が揃ってから見せて動かす）⇄ 一時停止（最後のコマで止める）
 let W, D, playing = false, live = false, canPlay = false, recorder, raf;
 const pending = [];  // 止めている間に作品が頼んだ requestAnimationFrame
 const coarse = matchMedia('(pointer: coarse)').matches;
-const get = name => { try { return W.eval(`typeof ${name} === 'undefined' ? null : ${name}`); } catch { return null; } };  // 作品側の let 変数を読む
 
 stage.onload = () => {
   W = stage.contentWindow; D = W.document;
@@ -110,11 +110,12 @@ const sync = () => {
   $('play').textContent = playing ? '❚❚ Pause' : '▶ Play';
   $('play').classList.toggle('on', playing);
 };
-// 素材の動画（ページに置いたもの、作品の vids・video 変数のもの）
-const media = () => [...D.querySelectorAll('video'), ...(get('vids') || []), get('video')].filter((v, i, a) => v && a.indexOf(v) === i);
+const piece = () => W?.piece || {};
+const media = () => piece().media?.() || [];  // 素材の動画
+const output = () => piece().output?.();      // 音の出口（#play を押すまでは無い）
 const toggle = async () => {
   if (!playing && !canPlay) return;  // 読み込みが終わるまでは始めない
-  const ac = get('ac');
+  const ac = output()?.context;
   playing = !playing;
   // iOS はタップの中で play() しないと素材の動画を読み込まない（読めるまで作品は何も描かない）ので、await より前に呼ぶ
   media().forEach(v => playing ? v.play().catch(() => {}) : v.pause());
@@ -145,20 +146,20 @@ const m = $('meter'), mc = m.getContext('2d');
 let buf, own;
 const meter = () => {
   requestAnimationFrame(meter);
-  // 素材の動画と人の検出（ghostidol・sugarrush の pose）。検出は読めなかったときのため 20 秒で待つのをやめる
-  const poseWait = D && W.eval("typeof pose !== 'undefined' && !pose") && performance.now() < 20000;
+  // 作品が待つもの（人の検出・曲・写真・前計算）と素材の動画。CDN が読めなかったときのため、作品の待ちは 20 秒でやめる
+  const waitPiece = D && piece().ready && !piece().ready() && performance.now() < 20000;
   const mediaWait = D && media().some(v => v.readyState < 2);
-  // ponytail: iOS はタップの中で play() するまで動画を読まないので、タッチの端末は動画を待たずに押せる（音が絵より少し先に出ることがある）
-  canPlay = !!D && !poseWait && (coarse || !mediaWait);
+  // 押す前は、開いた時点で読む動画だけ待つ。preload="none" の動画（fold）と、タップの中で play() するまで読まない iOS は、押してから待つ（その間は隠したまま。音が絵より少し先に出ることがある）
+  canPlay = !!D && !waitPiece && (coarse || !media().some(v => v.readyState < 2 && v.preload !== 'none'));
   $('play').disabled = !canPlay && !playing;
-  if (playing && !live && !poseWait && !mediaWait) { live = true; stage.classList.add('ready'); }
+  if (playing && !live && !waitPiece && !mediaWait) { live = true; stage.classList.add('ready'); }
   if (playing && live && pending.length) pending.splice(0).forEach(raf);
   $('hint').textContent = !canPlay || (playing && !live) ? '[ LOADING ]' : D.getElementById('files') ? '[ CLICK TO LOAD PHOTOS ]' : '[ SPACE / CLICK TO PLAY ]';
   $('hint').classList.toggle('off', playing && live);
   m.width = innerWidth; m.height = 24;
-  // an を持たない作品（modlines・slowdive）は、出力の out から分岐させて自前で作る
-  if (W && playing && !own && !get('an') && get('out')) { own = get('ac').createAnalyser(); get('out').connect(own); }
-  const an = W && playing ? get('an') || own : null;
+  // 作品の音の出口から分岐させて読む
+  if (W && playing && !own && output()) { own = output().context.createAnalyser(); output().connect(own); }
+  const an = playing ? own : null;
   if (!an || !an.getByteFrequencyData) return;
   if (!buf || buf.length !== an.frequencyBinCount) buf = new Uint8Array(an.frequencyBinCount);
   an.getByteFrequencyData(buf);

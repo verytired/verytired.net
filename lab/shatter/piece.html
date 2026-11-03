@@ -815,5 +815,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+// verytired.net のプレイヤーと render.py への窓口（README「作品側の決まり」）。ready は動画のほかに待つもの、media は再生と一緒に止める動画、output は音の出口
+window.piece = { output: () => comp };
 </script>
 </body></html>
