@@ -1,8 +1,39 @@
 # verytired.net
 
-`../hitori_av` の作品フォルダ（`NNN_名前/`）から作品一覧を作る静的サイト。
+Static site for [verytired.net](https://verytired.net). It is built from the audiovisual pieces in `../hitori_av` (one folder per piece, `NNN_name/`).
 
-- `python3 build.py` … 全部の分で `index.html`（最新作だけ）と `audiovisual/index.html`（全作品の一覧）と `lab/` を作る。`music.tsv`（曲名<TAB>URL）から `music/index.html` も作る（YouTube はそのまま、Bandcamp は埋め込みコードの `src` の URL を書く）。`tools.tsv` から `tools/index.html` も作る（画像は `tools/<名前>.jpg`）
-- `ga.py` … GA4 の1週間分を `data/ga/<年>-W<週>.json` に置く（週1作の素材。publish.sh が呼び、未取得の週だけ取る）
-- `check_player.py` … `uv run check_player.py [名前…]`。lab/ の全作品をブラウザ（Playwright）で開き、再生を押す前に見えない・動かない・鳴らないこと、押すと動き、一時停止で止まることを確かめる。publish.sh がビルドのあとに回し、NG があれば push しない
-- `publish.sh` … ビルドして main に push（指示したときだけ手で実行する。`net.verytired.publish.plist` は毎日 0:05 に回していたときのもので、今は登録していない）
+## Usage
+
+```sh
+python3 build.py [../hitori_av]   # build the site
+uv run check_player.py [name…]    # check every piece in lab/ in a browser
+./publish.sh                      # build, check, push to main (run by hand only)
+```
+
+## Output
+
+| Path | Contents |
+| --- | --- |
+| `index.html` | Top page: the latest piece only |
+| `audiovisual/index.html` | List of all pieces |
+| `lab/<name>/` | Each piece: `piece.html` (copied as is), `index.html` (wrapped in `player.html`), media in `src/`, light `.sp.mp4` for phones, `loop.mp4` preview |
+| `music/index.html` | Built from `music.tsv` |
+| `tools/index.html` | Built from `tools.tsv` |
+
+Pages use `template.html`; the piece player is `player.html`.
+
+## Input files
+
+| File | Format |
+| --- | --- |
+| `en.tsv` | `folder<TAB>English description` |
+| `youtube.tsv` | `folder<TAB>YouTube URL` — adds a YouTube link to that piece's player |
+| `music.tsv` | `title<TAB>URL` — YouTube URL, or the `src` of a Bandcamp embed |
+| `tools.tsv` | `name<TAB>description<TAB>play URL<TAB>GitHub URL<TAB>video URL (optional)`; image at `tools/<name>.jpg` |
+| `hold.txt` | Folder names to keep off the site for now |
+
+## Scripts
+
+- `check_player.py` — opens each piece with Playwright and checks that nothing is shown, moves or plays before Play is pressed, that it runs after Play, and that Pause stops it. `publish.sh` runs it after the build and does not push if anything fails.
+- `ga.py` — saves one week of GA4 data to `data/ga/<year>-W<week>.json`. Called by `publish.sh`; fetches only missing weeks.
+- `net.verytired.publish.plist` — launchd job from when `publish.sh` ran daily at 0:05. Not loaded now.
