@@ -11,6 +11,7 @@
 - audiovisual/index.html      … 全作品の一覧（template.html の {{ITEMS}}）
 - music/index.html            … music.tsv（曲名\tURL、上から並ぶ）から同じ template.html で作る
   YouTube の URL はサムネイル→押すと再生、それ以外（Bandcamp の EmbeddedPlayer の URL など）はそのまま iframe で埋める
+- lab/<名前>/index.html の YouTube ↗ … youtube.tsv（フォルダ名\tURL）に書いた作品だけ、操作バーに出す
 - tools/index.html            … tools.tsv（名前\t英文\t遊べる URL\tGitHub の URL\t動画 URL（任意））から作る。画像は tools/<名前>.jpg を手で置く
 """
 import datetime, html, re, shutil, subprocess, sys
@@ -20,6 +21,8 @@ SRC = Path(sys.argv[1] if len(sys.argv) > 1 else "../hitori_av").resolve()
 OUT = Path(__file__).parent
 LAB = OUT / "lab"
 # 説明は英語（タブ区切り: フォルダ名\t英文）。書き忘れた日は README の日本語を出す
+# YouTube に上げた長い版（タブ区切り: フォルダ名\tURL）。あれば作品のページの操作バーにリンクを出す
+YT = dict(l.split("\t", 1) for l in (OUT / "youtube.tsv").read_text().splitlines() if "\t" in l) if (OUT / "youtube.tsv").exists() else {}
 EN = dict(l.split("\t", 1) for l in (OUT / "en.tsv").read_text().splitlines() if "\t" in l) if (OUT / "en.tsv").exists() else {}
 
 
@@ -66,6 +69,7 @@ def build_item(d):
         "name": name,
         "desc": first_sentence(d / "README.md") if (d / "README.md").exists() else "",
         "en": EN.get(d.name, "").strip(),
+        "yt": YT.get(d.name, "").strip(),
         "live": piece.exists(),
         "date": added(d),
     }
@@ -90,6 +94,8 @@ def player(i, n):
     page = (OUT / "player.html").read_text()
     for k, v in {"NUM": f"{n:03d}", "NAME": i["name"], "DESC": i["en"] or i["desc"]}.items():
         page = page.replace("{{%s}}" % k, html.escape(v))
+    yt = f'<a class="k" href="{html.escape(i["yt"])}" target="_blank" rel="noopener" title="Long version on YouTube">YouTube ↗</a>' if i["yt"] else ""
+    page = page.replace("{{YT}}", yt) if yt else page.replace("  {{YT}}\n", "")
     (LAB / i["name"] / "index.html").write_text(page)
 
 
