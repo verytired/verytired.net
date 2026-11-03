@@ -127,7 +127,7 @@ const toggle = async () => {
 };
 $('play').onclick = toggle;
 // 写真を読み込む作品（strobe）は、最初のクリックで写真を選ぶ
-$('hint').onclick = () => !playing && D?.getElementById('files') ? D.getElementById('files').click() : toggle();
+$('hint').onclick = () => !live && D?.getElementById('files') ? D.getElementById('files').click() : toggle();
 $('rec').onclick = () => {
   if (recorder?.state === 'recording') return recorder.stop();  // 途中で止めても、そこまでの分は保存される
   if (!playing) toggle();
@@ -154,7 +154,7 @@ const meter = () => {
   $('play').disabled = !canPlay && !playing;
   if (playing && !live && !waitPiece && !mediaWait) { live = true; stage.classList.add('ready'); }
   if (playing && live && pending.length) pending.splice(0).forEach(raf);
-  $('hint').textContent = !canPlay || (playing && !live) ? '[ LOADING ]' : D.getElementById('files') ? '[ CLICK TO LOAD PHOTOS ]' : '[ SPACE / CLICK TO PLAY ]';
+  $('hint').textContent = !canPlay || (playing && !live) ? '[ LOADING ]' : !live && D.getElementById('files') ? '[ CLICK TO LOAD PHOTOS ]' : '[ SPACE / CLICK TO PLAY ]';
   $('hint').classList.toggle('off', playing && live);
   m.width = innerWidth; m.height = 24;
   // 作品の音の出口から分岐させて読む
