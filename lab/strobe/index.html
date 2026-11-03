@@ -148,8 +148,8 @@ const meter = () => {
   // 作品が待つもの（人の検出・曲・写真・前計算）と素材の動画。CDN が読めなかったときのため、作品の待ちは 20 秒でやめる
   const waitPiece = D && piece().ready && !piece().ready() && performance.now() < 20000;
   const mediaWait = D && media().some(v => v.readyState < 2);
-  // 押す前は、開いた時点で読む動画だけ待つ。preload="none" の動画（fold）と、タップの中で play() するまで読まない iOS は、押してから待つ（その間は隠したまま。音が絵より少し先に出ることがある）
-  canPlay = !!D && !waitPiece && (coarse || !media().some(v => v.readyState < 2 && v.preload !== 'none'));
+  // iOS はタップの中で play() するまで動画を読まないので、タッチの端末は押してから待つ（その間は隠したまま。音が絵より少し先に出ることがある）
+  canPlay = !!D && !waitPiece && (coarse || !mediaWait);
   $('play').disabled = !canPlay && !playing;
   if (playing && !live && !waitPiece && !mediaWait) { live = true; stage.classList.add('ready'); }
   if (playing && live && pending.length) pending.splice(0).forEach(raf);
