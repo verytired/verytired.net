@@ -145,9 +145,10 @@ def main():
     for n, i in numbered:
         if i["live"]:
             player(i, n)
-    # トップは最新作だけ。一覧は audiovisual/ に置く
+    # トップは新しい5本を大きく縦に。全部は audiovisual/ に置く
     page = (OUT / "template.html").read_text()
-    for k, v in {"HERO": intro() + f'<section class="latest" id="latest"><time>{numbered[0][1]["date"]}</time>{tile(*numbered[0][::-1])}</section>', "ITEMS": "", "SUB": "", "ROOT": "./"}.items():
+    recent = "".join(f'<time>{i["date"]}</time>{tile(i, n)}' for n, i in numbered[:5]) + '<a class="all" href="audiovisual/">all →</a>'
+    for k, v in {"HERO": intro() + f'<section class="latest" id="latest">{recent}</section>', "ITEMS": "", "SUB": "", "ROOT": "./"}.items():
         page = page.replace("{{%s}}" % k, v)
     (OUT / "index.html").write_text(page)
     page = (OUT / "template.html").read_text()

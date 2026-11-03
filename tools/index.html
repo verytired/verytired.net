@@ -36,10 +36,12 @@
   .intro .down { margin-top: auto; color: var(--dim); text-decoration: none; }
   .intro a:hover, .intro a:focus-visible { background: var(--accent); color: var(--bg); text-decoration: none; text-shadow: none; outline: none; }  /* 一覧の作品番号と同じ帯 */
   .intro .down { align-self: flex-start; }
-  .latest { min-height: 100svh; padding: 48px 16px 0; display: grid; justify-items: center; align-content: start; gap: 8px; }  /* 1画面ぶんあれば、短い画面でも上端まで届いてヘッダーが出る */
+  .latest { min-height: 100svh; padding: 48px 16px 0; display: grid; justify-items: center; align-content: start; gap: 8px; }
   .latest time { color: var(--dim); }
-  .latest .tile { width: min(100%, 78vh); }
+  .latest .tile { width: min(100%, 78vh); margin-bottom: 64px; }  /* 1画面ぶんあれば、短い画面でも上端まで届いてヘッダーが出る */
   .latest .cap em { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }  /* 説明は2行まで */
+  .all { color: var(--dim); }
+  .all:hover, .all:focus-visible { background: var(--accent); color: var(--bg); outline: none; }
   main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .tile { display: block; background: var(--bg); transition: transform .15s ease-out; }
   .tile video, .tile img, .tile iframe { width: 100%; aspect-ratio: 1; display: block; background: #000; border: 0; object-fit: cover; transition: transform .2s; }
