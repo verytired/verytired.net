@@ -4,6 +4,7 @@ set -e
 cd "${0:A:h}"
 ./ga.py || echo "ga.py に失敗（サイトの公開は続ける）"
 python3 build.py
+uv run check_player.py   # 再生を押す前に見えたり鳴ったりする作品があれば、ここで止まって公開しない
 git add -A
 git diff --cached --quiet && exit 0
 git commit -q -m "publish $(date +%F)"
