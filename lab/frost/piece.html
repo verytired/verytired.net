@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Frost</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+  body.fit canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; max-width: none; max-height: none; }
+  body.fit #panel { position: fixed; top: 8px; left: 8px; z-index: 1; background: #000a; padding: 8px; }
+  #hud { font: 11px/1.5 ui-monospace, monospace; white-space: pre; color: #888; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+    <option value="1920x1080">16:9</option>
+    <option value="fit">Fit</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="900" value="60"></label>
+  <button id="rec">● 録画して保存</button>
+  <hr style="width:100%;border:0;border-top:1px solid #333">
+  <label>試す音色 <select id="kind"><option value="">おまかせ</option><option>hiss</option><option>whine</option><option>roar</option><option>sub</option></select></label>
+  <label>見せ方 <select id="view"><option value="">おまかせ</option><option value="k">万華鏡</option><option value="i">島と等高線</option><option value="r">干渉縞</option><option value="m">迷路</option><option value="c">セル・オートマトン</option></select></label>
+  <button id="reroll">別の動きで</button>
+  <label>テンポ <select id="tempo"><option value="">IG（60秒向け）</option><option value="long">YouTube（ゆっくり・数分）</option></select></label>
+  <div id="hud"></div>
+</div>
+
+<script>
+// ノイズの持続音のシンセのつまみ（カットオフ・LFO・エンベロープ・歪み・レゾナンス）を、そのまま白黒の4回対称の模様（万華鏡）に渡す。区間が変わると点に戻る
+const c = document.getElementById('c'), gl = c.getContext('webgl', { preserveDrawingBuffer: true });
+const hud = document.getElementById('hud');
+
+// ---------- 楽譜：区間ごとの音色（乱数の種を固定して、毎回同じにする） ----------
+const mkRng = seed => (s => () => (s = (s + 0x6D2B79F5) | 0, s = Math.imul(s ^ (s >>> 15), s | 1), s ^= s + Math.imul(s ^ (s >>> 7), s | 61), ((s ^ (s >>> 14)) >>> 0) / 4294967296))(seed);
+let rng = mkRng(22);
+// テンポ：long（YouTube 向け）は区間を長く、つまみの動きを ゆっくりにする。URL の ?tempo=long でも選べる
+let SLOW = 1;
+const tempoQ = new URLSearchParams(location.search).get('tempo') || '';
+const setTempo = v => { SLOW = v === 'long' ? 3.5 : 1; };
+setTempo(tempoQ);
+const R = (a, b) => a + (b - a) * rng(), pick = a => a[rng() * a.length | 0];
+const KINDS = {
+  // つまみの範囲。[始め, 終わり] は区間の中で動かす。cut は Hz、lfoD はオクターブ
+  hiss:  () => ({ type: 'bandpass', noise: 1,   drone: 0,   cut: [R(300, 600), R(7e3, 11e3)],  q: R(1, 3),   drive: [R(1, 2), R(3, 5)],  lfoR: [R(0.15, 0.4), R(1.5, 4)],  lfoD: [0, R(0.3, 0.8)],  att: R(2, 5),   comb: R(150, 330), fb: [0.1, R(0.3, 0.5)] }),
+  roar:  () => ({ type: 'lowpass',  noise: 0.8, drone: 0.7, cut: [R(80, 160), R(3e3, 6e3)],    q: R(2, 6),   drive: [R(6, 10), R(18, 30)], lfoR: [R(0.1, 0.25), R(0.5, 1.5)], lfoD: [R(0.1, 0.3), R(0.6, 1.2)], att: R(4, 8), comb: R(40, 90), fb: [0.4, R(0.75, 0.88)] }),
+  whine: () => ({ type: 'bandpass', noise: 0.7, drone: 0.2, cut: [R(200, 400), R(4e3, 8e3)],   q: R(8, 18),  drive: [R(2, 4), R(6, 10)],  lfoR: [R(1, 3), R(4, 7)],  lfoD: [R(0.05, 0.2), R(0.3, 0.6)], att: R(1, 4), comb: R(180, 340), fb: [0.6, R(0.88, 0.93)] }),
+  sub:   () => ({ type: 'lowpass',  noise: 0.4, drone: 1,   cut: [R(60, 100), R(1e3, 2.5e3)],  q: R(4, 10),  drive: [R(4, 8), R(10, 16)], lfoR: [R(0.05, 0.15), R(0.3, 1)], lfoD: [R(0.2, 0.5), R(0.8, 1.5)], att: R(5, 10), comb: R(45, 70), fb: [0.3, R(0.6, 0.8)] }),
+};
+let SECS = [];
+// 区間の表を作る。force で音色を1つに決める（試すとき）、seed で動きを変える
+function build(force = '', seed = 22) { rng = mkRng(seed); SECS = []; let t = 0, prev = '', prevV = '';
+  while (t < 3600) {   // 1時間ぶん（流しっぱなしでも切り替わり続ける）
+    let k; do k = force || pick(Object.keys(KINDS)); while (k === prev && !force); prev = k;
+    const len = SLOW > 1 ? R(60, 120) : R(18, 30), s = KINDS[k](); s.kind = k; s.t0 = t; s.len = len; s.f0 = R(36, 62); s.lvl = R(0.6, 0.9); s.seed = R(0, 100);
+    do s.view = pick(['k', 'i', 'r', 'm', 'c']); while (s.view === prevV); prevV = s.view;   // 見せ方は区間ごとに選ぶ（前と同じにしない）
+    // 手でつまみを回すような動き。つまみごとに別々に作る（重なったり、ずれたり、逆に動いたりする）
+    s.tr = { cut: track(len, 1, 0.9), drive: track(len, 0.7, 0.5), res: track(len, 0.8, 0.2), mix: track(len, 0.5, 0.4), lfo: track(len, 0.6, 0.6),
+             dly: track(len, 0.5, 0.3), dfb: track(len, 0.6, 0.4), rv: track(len, 0.6, 0.5), rvl: track(len, 0.4, 0.3) };   // ディレイの時間・戻り、リバーブの量・長さ
+    s.gt = []; for (let tt = R(2, 6); tt < len - 1; tt += R(3, 9) * SLOW * 1.5) s.gt.push({ t: tt, dur: R(0.5, 1.6), rate: pick([4, 6, 8]) });   // 刻む（ゲート）
+    s.cs = [{ t: 0, hz: s.comb, n: 0 }]; for (let tt = R(1.5, 5), n = 1; tt < len; tt += R(1.5, 6) * SLOW, n++) s.cs.push({ t: tt, hz: s.comb * pick([0.5, 0.667, 0.75, 1, 1.333, 1.5, 2]), n });   // コムの高さが段で跳ぶ
+    SECS.push(s); t += len;
+  } }
+build();
+// 動きの列：0.4〜2.5秒おきに、押す（素早く）・戻す・ゆっくり寄せる・一瞬のぞく。trend は区間の終わりに向かう強さ（1 なら最大へ）
+function track(len, busy, trend) {
+  const mv = [], start = R(0, 0.4);
+  for (let tt = R(0.3, 1.5); tt < len - 0.5; tt += R(0.4, 2.5) * SLOW / busy) {
+    const x = tt / len, aim = start + (x - start) * trend + R(-0.35, 0.35) * (1 - trend * 0.5);
+    if (rng() > (SLOW > 1 ? 0.97 : 0.9)) {   // 一瞬のぞく（ゆっくり版ではほぼ出さない）
+      mv.push({ t: tt, v: 1, sl: 0.04 }, { t: tt + R(0.25, 0.6), v: Math.max(0, aim), sl: 0.08 }); continue; }
+    mv.push({ t: tt, v: Math.max(0.02, Math.min(1, aim)), sl: rng() < 0.55 / SLOW ? R(0.03, 0.12) : R(0.4, 1.4) * SLOW });
+  }
+  if (trend > 0.8) mv.push({ t: len - 0.5, v: 1, sl: 0.3 });
+  mv.sort((a, b) => a.t - b.t);
+  let prev = { t: 0, from: start, v: start, sl: 1 };
+  for (const m of mv) { m.from = mvAt(prev, m.t); prev = m; }   // 動き出す時点の値（前の動きの途中から）
+  mv.start = start; return mv;
+}
+const trAt = (mv, tau) => { let m = null; for (const n of mv) { if (n.t > tau) break; m = n; } return m ? mvAt(m, tau) : mv.start; };
+function mvAt(m, tau) { const a = Math.min(1, (tau - m.t) / m.sl), e = a * a * (3 - 2 * a); return m.from + (m.v - m.from) * e; }
+const secAt = t => { let i = 0; while (i < SECS.length - 1 && SECS[i + 1].t0 <= t) i++; return i; };
+
+// つまみ：時刻 t のシンセの値。音と絵の両方がこれだけを見る
+const lin = (r, x) => r[0] + (r[1] - r[0]) * x, exp = (r, x) => r[0] * Math.pow(r[1] / r[0], x);
+function knobs(t) {
+  const i = secAt(Math.max(0, t)), s = SECS[i], tau = Math.max(0, t - s.t0), x = Math.min(1, tau / s.len);
+  const r0 = s.lfoR[0] / Math.sqrt(SLOW), r1 = s.lfoR[1] / Math.sqrt(SLOW), ph = r0 * tau + (r1 - r0) * tau * tau / (2 * s.len);   // LFO の位相：速さを積分した値
+  const lfo = Math.sin(2 * Math.PI * ph);
+  const P = {}; for (const n in s.tr) P[n] = trAt(s.tr[n], tau);   // それぞれのつまみの位置 0〜1
+  const cut0 = exp(s.cut, P.cut);
+  let cs = s.cs[0]; for (const n of s.cs) { if (n.t > tau) break; cs = n; }
+  let gate = 1; for (const g of s.gt) if (tau >= g.t && tau < g.t + g.dur) gate = Math.floor((tau - g.t) * g.rate * 2) % 2 ? 0 : 1;
+  const env = (tau < 0.05 ? 0 : Math.min(1, (tau - 0.05) / s.att)) * s.lvl * gate;             // 区間の頭で 50ms 切ってから、att 秒で立ち上がる。ゲートで刻む
+  const lfoD = lin(s.lfoD, P.lfo);
+  return { i, s, x, tau, P, ph, dly: 0.06 + P.dly * 0.6, dfb: 0.15 + P.dfb * 0.7, rv: P.rv, rvl: P.rvl, comb: cs.hz, combN: cs.n, mix: P.mix, lfo, lfoR: r0 + (r1 - r0) * x, lfoD, cut0, cut: Math.min(16e3, cut0 * Math.pow(2, lfo * lfoD)),
+           q: s.q * Math.pow(2, (P.res - 0.5) * 2), drive: lin(s.drive, P.drive), env, gate, fb: lin(s.fb, x) };
+}
+
+// ---------- 音 ----------
+let ac = null, audioDest, T0 = 0, dl, dFb, rvS, rvL, master, pre, filt, comb, combFb, oscs = [], noiseG, droneG;
+function startAudio() {
+  if (ac) return ac.resume();
+  ac = new AudioContext(); T0 = ac.currentTime;
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 8; comp.attack.value = 0.003; comp.release.value = 0.1;
+  master = ac.createGain(); master.gain.value = 0; master.connect(comp);
+  // ディレイ（戻しあり）とリバーブ（短い・長い残響を混ぜる）。切れ目やゲートで音を切っても、残りは鳴り続ける
+  dl = ac.createDelay(2); dFb = ac.createGain(); const dWet = ac.createGain(); dWet.gain.value = 0.55;
+  master.connect(dl); dl.connect(dFb); dFb.connect(dl); dl.connect(dWet); dWet.connect(comp);
+  const ir = sec => { const n = ac.sampleRate * sec | 0, b = ac.createBuffer(2, n, ac.sampleRate);
+    for (let ch = 0; ch < 2; ch++) { const d = b.getChannelData(ch); for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / n * 7); }
+    const cv = ac.createConvolver(); cv.buffer = b; return cv; };
+  [rvS, rvL] = [0.7, 4].map(sec => { const cv = ir(sec), g = ac.createGain(); g.gain.value = 0; master.connect(cv); cv.connect(g); g.connect(comp); return g; });
+  comp.connect(ac.destination); comp.connect(audioDest = ac.createMediaStreamDestination());
+  // 音源：白いノイズ ＋ 少しずらした3本のノコギリ波（低いうなり）
+  const nb = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate), d = nb.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const ns = ac.createBufferSource(); ns.buffer = nb; ns.loop = true;
+  noiseG = ac.createGain(); droneG = ac.createGain(); ns.connect(noiseG);
+  for (const r of [1, 1.007, 1.5]) { const o = ac.createOscillator(); o.type = 'sawtooth'; o.connect(droneG); oscs.push([o, r]); o.start(); }
+  // 歪み → フィルター → コム（短いディレイの戻しで音程のある唸り）
+  pre = ac.createGain(); noiseG.connect(pre); droneG.connect(pre);
+  const sh = ac.createWaveShaper(), cv = new Float32Array(1024);
+  for (let i = 0; i < 1024; i++) cv[i] = Math.tanh((i / 511.5 - 1) * 3);
+  sh.curve = cv; pre.connect(sh);
+  // フィルターの種類は予約できないので、ローパスとバンドパスを並べて音量で切り替える
+  const fsum = ac.createGain(); filt = ['lowpass', 'bandpass'].map(type => {
+    const f = ac.createBiquadFilter(), g = ac.createGain(); f.type = type; g.gain.value = 0;
+    sh.connect(f); f.connect(g); g.connect(fsum); return { f, g, type };
+  });
+  comb = ac.createDelay(0.05); combFb = ac.createGain();
+  fsum.connect(comb); comb.connect(combFb); combFb.connect(comb);
+  fsum.connect(master); comb.connect(master);
+  ns.start();
+  // つまみの値を 1.5秒先まで 20ms 刻みで予約する。描画（窓が隠れると止まる）とは切り離す
+  schedT = 0; audSec = -1;
+  clearInterval(schedId); schedId = setInterval(() => { if (ac) while (schedT < ac.currentTime - T0 + 1.5) { drive(knobs(schedT), T0 + schedT); schedT += 0.02; } }, 50);
+}
+let audSec = -1, schedT = 0, schedId;
+function drive(k, at) {
+  const s = k.s, L = (p, v) => p.linearRampToValueAtTime(v, at);
+  if (k.i !== audSec) {                                   // 区間の頭：音色を即座に切り替える
+    audSec = k.i;
+    for (const [o, r] of oscs) o.frequency.setValueAtTime(s.f0 * r, at);
+    for (const x of filt) x.g.gain.setValueAtTime(x.type === s.type ? 1 : 0, at);
+    master.gain.setValueAtTime(0, at);
+  }
+  L(master.gain, k.env); L(pre.gain, k.drive); L(combFb.gain, k.fb);
+  L(dl.delayTime, k.dly); L(dFb.gain, k.dfb); L(rvS.gain, k.rv * (1 - k.rvl) * 0.8); L(rvL.gain, k.rv * k.rvl * 0.8);   // ディレイ・リバーブ
+  L(noiseG.gain, s.noise * (1.2 - k.mix * 0.8)); L(droneG.gain, (s.drone * 0.5 + 0.15) * k.mix);   // 混ぜ具合：ノイズ ↔ うなり
+  comb.delayTime.setValueAtTime(1 / k.comb, at);                                                     // コムの高さ（段で跳ぶ）
+  for (const x of filt) { L(x.f.frequency, k.cut); L(x.f.Q, k.q); }
+}
+
+// ---------- 絵：WebGL のシェーダー1枚 ----------
+const VS = 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }';
+const FS = `precision highp float;
+uniform vec2 uRes; uniform float uSize, uGrow, uDepth, uSeed, uT, uFlick, uWhite, uMode, uTh, uLines, uScale, uFlow, uOn, uGap, uSrc, uWave, uPhase, uLfoPh, uTile, uThick; uniform sampler2D uCA; uniform vec2 uCAn;
+float h(vec3 p){ p = fract(p * vec3(.1031, .1030, .0973)); p += dot(p, p.yxz + 33.33); return fract((p.x + p.y) * p.z); }
+float vn(vec3 p){ vec3 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
+  return mix(mix(mix(h(i), h(i + vec3(1,0,0)), f.x), mix(h(i + vec3(0,1,0)), h(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(h(i + vec3(0,0,1)), h(i + vec3(1,0,1)), f.x), mix(h(i + vec3(0,1,1)), h(i + vec3(1,1,1)), f.x), f.y), f.z); }
+// 島と等高線：なめらかなノイズをしきい値で白黒に分け、黒い側の岸に1ドット幅の等高線を並べる
+vec3 islands(){
+  float dot_ = 2. / 170.;                                          // 1ドット（短い辺を 170 ドットに）
+  vec2 p = (gl_FragCoord.xy - .5 * uRes) / min(uRes.x, uRes.y) * 2.;
+  p = floor(p / dot_) * dot_;                                      // ドットの格子で取るので、線が直角の階段になる
+  vec3 z = vec3(p * uScale + vec2(uFlow * .6, uFlow * .2), uSeed + uFlow);   // 時間の向きと横に流す
+  float F = vn(z) * .75 + vn(z * 2.1 + 7.) * .25;
+  if (F > uTh) return vec3(1.);
+  float k = (uTh - F) / uGap;                                       // 岸からの距離を等高線の本数に（1本がドット2つ分くらい）
+  return vec3(step(k, uLines) * step(fract(k), .5));
+}
+void main(){
+  if (uMode > .5 && uMode < 1.5) { vec3 o = islands(); gl_FragColor = vec4(uOn > .5 ? o : 1. - o, 1.); return; }   // ゲートで切れている間は白黒反転
+  // 白と黒の 0/1 だけ。ドットの大きさは決まっていて（短い辺に 170 ドット）、全体を拡大せずにドットが増えて育つ
+  float dot_ = 2. / 170.;
+  vec2 p = (gl_FragCoord.xy - .5 * uRes) / min(uRes.x, uRes.y) * 2.;
+  vec2 g = floor(p / dot_);                                  // ドットの番号
+  p = (g + .5) * dot_;
+  // 外形：菱形 → 八角形 → 横長の長方形（uGrow 0→1）
+  vec2 ex = uRes / min(uRes.x, uRes.y);                     // 画面の半分の幅・高さ（短い辺が 1）
+  vec2 q = abs(p) / (uSize * mix(vec2(1.), ex, smoothstep(.6, 1., uGrow)));   // 長方形の段で画面の縦横比に近づけ、最後に画面いっぱいに
+  float d = max(max(q.x, q.y), (q.x + q.y) * mix(1., .55, smoothstep(.15, .7, uGrow)));
+  float inside = step(d, 1.);
+  if (uMode > 1.5) {
+    float v = 0.;
+    if (uMode < 2.5) {
+      // 干渉縞：いくつかの中心から同心円の波を出し、白黒を XOR で重ねる。中心は LFO で回る
+      for (int i = 0; i < 5; i++) {
+        float fi = float(i); if (fi >= uSrc) break;
+        float a = uLfoPh * 6.2832 * (mod(fi, 2.) < .5 ? 1. : -1.) + fi * 2.4, rad = 18. + fi * 14.;
+        v = abs(v - step(.5, fract(length(g + .5 - rad * vec2(cos(a), sin(a))) / uWave - uPhase)));
+      }
+      inside = 1.;
+    } else if (uMode < 3.5) {
+      // 迷路：斜めの線のタイル。LFO の速さで裏返る
+      vec2 cell = floor(g / uTile), f = mod(g, uTile);
+      float fl = step(.5, h(vec3(cell, uSeed + floor(uT * uFlick + h(vec3(cell, 9.)) * 4.))));
+      float dd = fl > .5 ? abs(f.x - f.y) : abs(f.x + f.y - uTile + 1.);
+      v = step(dd, uThick - .5);
+    } else {
+      // セル・オートマトン：JS で1行ずつ作ったドットをそのまま貼る
+      v = step(.5, texture2D(uCA, (floor(g / 2.) + floor(uCAn * .5) + .5) / uCAn).r);
+      inside = 1.;
+    }
+    gl_FragColor = vec4(vec3(inside * (uOn > .5 ? v : 1. - v)), 1.); return;
+  }
+  // 模様：上下左右と対角で折り返す（8つ折り）→ 四分木の段ごとに白黒を XOR で重ねる
+  vec2 u = vec2(g.x < 0. ? -g.x - 1. : g.x, g.y < 0. ? -g.y - 1. : g.y); if (u.x < u.y) u = u.yx;   // ドットの番号を折り返す
+  float v = 0., n = 1. / 32.;                               // 一番粗い段は 32 ドットのマス、そこから 16・8・4・2・1
+  for (int i = 0; i < 7; i++) {
+    float fi = float(i); if (fi > uDepth) break;
+    float w = clamp(uDepth - fi, 0., 1.);                   // 一番深い段は少しずつ現れる
+    float s = uSeed + fi * 17. + (fi > uDepth - 2. ? floor(uT * uFlick) * 3.1 : 0.);   // 深い2段は LFO の速さでチラつく
+    v = abs(v - step(h(vec3(floor(u * n), s)), uWhite * w)); n *= 2.;
+  }
+  gl_FragColor = vec4(vec3(inside * v * uOn), 1.);   // ゲートで切れている間は消える
+}`;
+const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(o); return o; };
+const pg = gl.createProgram(); gl.attachShader(pg, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(pg, sh(gl.FRAGMENT_SHADER, FS)); gl.bindAttribLocation(pg, 0, "p"); gl.linkProgram(pg); gl.useProgram(pg);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer()); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const U = {}; for (const k of ['uRes', 'uSize', 'uGrow', 'uDepth', 'uSeed', 'uT', 'uFlick', 'uWhite', 'uMode', 'uTh', 'uLines', 'uScale', 'uFlow', 'uOn', 'uGap', 'uSrc', 'uWave', 'uPhase', 'uLfoPh', 'uTile', 'uThick', 'uCA', 'uCAn']) U[k] = gl.getUniformLocation(pg, k);
+
+const setSize = () => {
+  const v = document.getElementById('aspect').value, fit = v === 'fit', dpr = Math.min(2, devicePixelRatio || 1);
+  document.body.classList.toggle('fit', fit);
+  [c.width, c.height] = fit ? [innerWidth * dpr | 0, innerHeight * dpr | 0] : v.split('x').map(Number);   // 画面に合わせるときはウィンドウを測る
+  gl.viewport(0, 0, c.width, c.height);
+  // セル・オートマトンのドット（短い辺に 170 ドット、シェーダーと同じ）
+  const dp = Math.min(c.width, c.height) / 170; CA.w = Math.ceil(c.width / dp / 2) + 2; CA.h = Math.ceil(c.height / dp / 2) + 2;   // 1マス 2ドット
+  CA.d = new Uint8Array(CA.w * CA.h); CA.sec = -1;
+  // 模様はドットの解像度（短い辺 170）で描き、前のコマを残して重ねてから画面に引き伸ばす
+  FB.w = Math.round(c.width / dp); FB.h = Math.round(c.height / dp);
+  FB.ring = Array.from({ length: RING }, () => target(FB.w, FB.h)); FB.rev = [target(FB.w, FB.h), target(FB.w, FB.h)]; FB.tick = -1;
+};
+const RING = 100, FB = { w: 0, h: 0, ring: [], rev: [], head: 0, tick: -1, r: 0 };   // ring：30コマ/秒で残した過去のコマ（ディレイ用）
+function target(w, h) {
+  const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+  const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); return { tex, fb };
+}
+// 残響：前の残りのドットを、リバーブの量・長さで決まる割合だけ残す（白黒のまま、ディザで少しずつ消える）
+const FS_REV = `precision highp float; uniform sampler2D uNow, uPrev; uniform vec2 uN; uniform float uKeep, uTick;
+float h(vec3 p){ p = fract(p * vec3(.1031, .1030, .0973)); p += dot(p, p.yxz + 33.33); return fract((p.x + p.y) * p.z); }
+void main(){ vec2 uv = gl_FragCoord.xy / uN; float now = texture2D(uNow, uv).r, prev = texture2D(uPrev, uv).r;
+  gl_FragColor = vec4(vec3(max(now, prev * step(h(vec3(gl_FragCoord.xy, uTick)), uKeep))), 1.); }`;
+// 仕上げ：今のコマ・残響・ディレイのこだま（過去のコマを、ずらして・ドットを欠かしながら重ねる）
+const FS_OUT = `precision highp float; uniform sampler2D uNow, uRev, uE1, uE2, uE3, uE4, uE5; uniform vec2 uRes, uN, uShift; uniform float uEn, uFb, uTick;
+float h(vec3 p){ p = fract(p * vec3(.1031, .1030, .0973)); p += dot(p, p.yxz + 33.33); return fract((p.x + p.y) * p.z); }
+float echo(sampler2D t, vec2 dt_, float j){ vec2 d = floor(dt_ * uN) - uShift * j;
+  return j > uEn ? 0. : texture2D(t, (d + .5) / uN).r * step(h(vec3(d, uTick + j * 7.)), pow(uFb, j)); }
+void main(){ vec2 uv = gl_FragCoord.xy / uRes;
+  float v = max(texture2D(uNow, uv).r, texture2D(uRev, uv).r);
+  v = abs(v - echo(uE1, uv, 1.)); v = abs(v - echo(uE2, uv, 2.)); v = abs(v - echo(uE3, uv, 3.)); v = abs(v - echo(uE4, uv, 4.)); v = abs(v - echo(uE5, uv, 5.));   // こだまは XOR で重ねる（白が増えすぎない）
+  gl_FragColor = vec4(vec3(v), 1.); }`;
+const prog = fs => { const o = gl.createProgram(); gl.attachShader(o, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(o, sh(gl.FRAGMENT_SHADER, fs)); gl.bindAttribLocation(o, 0, 'p'); gl.linkProgram(o);
+  const u = {}; for (let i = 0, n = gl.getProgramParameter(o, gl.ACTIVE_UNIFORMS); i < n; i++) { const a = gl.getActiveUniform(o, i).name; u[a] = gl.getUniformLocation(o, a); } return { o, u }; };
+const PR = prog(FS_REV), PO = prog(FS_OUT);
+const bindTex = (unit, tex) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); };
+// セル・オートマトン：1行ずつ規則で次の行を作り、上に足して下へ流す
+const CA = { w: 0, h: 0, d: null, sec: -1, acc: 0 }, RULES = [90, 150, 18, 126, 110, 105, 30, 182, 60, 73];   // 入れ子の三角形になるものを中心に、乱れる 30 は少し
+const caTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, caTex);
+for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+function caStep(k, dt) {
+  const { w, h, d } = CA;
+  if (k.i !== CA.sec) { CA.sec = k.i; d.fill(0); CA.acc = 0; CA.rn = -1; }
+  if (k.combN !== CA.rn) {   // 区間の頭・コムの高さが跳んだとき：一番上の行を点に打ち直す（混ぜ具合で 1〜4 点）。そこから新しい三角形が育つ
+    CA.rn = k.combN; const top = (h - 1) * w, n = 1 + Math.round(k.mix * 3); d.fill(0, top);
+    for (let j = 0; j < n; j++) d[top + Math.round(w * (j + 1) / (n + 1))] = 255;
+  }
+  CA.acc += dt * (2 + k.P.cut * 30) / Math.sqrt(SLOW);                    // カットオフ → 流れる速さ（1秒に何行）
+  const rule = RULES[k.combN % RULES.length];           // コムの高さが跳ぶとルールが変わる
+  for (; CA.acc >= 1; CA.acc--) {
+    const top = (h - 1) * w, row = new Uint8Array(w);
+    for (let x = 0; x < w; x++) {
+      const l = d[top + (x + w - 1) % w] ? 4 : 0, c0 = d[top + x] ? 2 : 0, r = d[top + (x + 1) % w] ? 1 : 0;
+      row[x] = (rule >> (l | c0 | r)) & 1 ? 255 : 0;
+      if (Math.random() < k.P.drive * 0.002) row[x] ^= 255;   // 歪み → ドットがランダムに裏返る
+    }
+    d.copyWithin(0, w); d.set(row, top);
+  }
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, caTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w, h, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, d);
+}
+addEventListener('resize', () => { if (document.getElementById('aspect').value === 'fit') setSize(); });
+
+let flow = 0, lastT = 0, phase = 0; const held = { st: -1, grow: 0 }, DOT = 2 / 170;   // DOT：1ドット（シェーダーと同じ）
+function frame() {
+  requestAnimationFrame(frame);
+  const t = ac ? ac.currentTime - T0 : 0;
+  let size = 0.015, grow = 0, depth = 0, shape = 0, k = knobs(0), s = SECS[0];
+  if (ac) {
+    k = knobs(t); s = k.s;
+    // カットオフ（LFO 込み）→ 大きさ。100Hz で点、8kHz でいっぱい
+    // 大きさは 1秒に15回だけ書き換え、4ドット単位の段々にする（なめらかに拡縮させない）
+    const st = Math.floor(t * 15);
+    if (st !== held.st) { held.st = st; held.grow = Math.min(1, Math.max(0, SLOW > 1 ? Math.log2(k.cut / s.cut[0]) / Math.log2(s.cut[1] / s.cut[0])   // ゆっくり版：その区間のカットオフの範囲の中でどこまで開いたか
+                                                               : Math.log2(k.cut / 100) / Math.log2(80))); }
+    grow = held.grow;
+    size = Math.max(1, Math.round((0.012 + Math.pow(grow, SLOW > 1 ? 0.9 : 1.6) * 0.95) / DOT / 4)) * 4 * DOT;
+    depth = Math.min(4.9, 1 + Math.log2(k.drive) * 1.2 + k.P.drive * 2);   // 歪み → 細かさ（足される段の数）
+    shape = held.mix = st === held.st2 ? held.mix : k.mix; held.st2 = st;   // 混ぜ具合 → 外形
+  }
+  const tick = Math.floor(t * 30), newTick = tick !== FB.tick;
+  if (newTick) { FB.tick = tick; FB.head = (FB.head + 1) % RING; }
+  gl.useProgram(pg); gl.bindFramebuffer(gl.FRAMEBUFFER, FB.ring[FB.head].fb); gl.viewport(0, 0, FB.w, FB.h); bindTex(0, caTex);
+  gl.uniform2f(U.uRes, FB.w, FB.h);
+  gl.uniform1f(U.uSize, size); gl.uniform1f(U.uGrow, Math.max(shape, grow * 0.5)); gl.uniform1f(U.uDepth, depth);
+  gl.uniform1f(U.uSeed, s.seed + k.combN * 7.3);   // コムの高さが跳ぶと模様が組み替わる gl.uniform1f(U.uT, t);
+  gl.uniform1f(U.uFlick, 0.5 + k.lfoR * 1.5);                      // LFO の速さ → 細かい段のチラつき
+  gl.uniform1f(U.uWhite, (0.25 + k.P.res * 0.5) * (0.6 + 0.4 * k.env / k.s.lvl));   // レゾナンス・エンベロープ → 白の割合
+  const vw = document.getElementById('view').value || s.view;   // 見せ方：区間ごとに選んだもの（パネルで上書きできる）
+  gl.uniform1f(U.uMode, 'kirmc'.indexOf(vw));
+  const dt = Math.max(0, Math.min(0.1, t - lastT));
+  if (vw === 'c' && ac) caStep(k, dt);
+  gl.uniform2f(U.uCAn, CA.w, CA.h); gl.uniform1i(U.uCA, 0);
+  phase += dt * (0.2 + k.P.cut * 3) / Math.sqrt(SLOW);                             // 干渉縞：カットオフ → 波が広がる速さ
+  gl.uniform1f(U.uSrc, 2 + Math.round(k.mix * 3));              // 混ぜ具合 → 中心の数
+  gl.uniform1f(U.uWave, Math.max(5, Math.min(40, 2400 / k.comb)));   // コムの高さ → 波の細かさ（ドット）
+  gl.uniform1f(U.uPhase, phase); gl.uniform1f(U.uLfoPh, k.ph * 0.05);
+  gl.uniform1f(U.uTile, [16, 12, 8, 6, 4][Math.min(4, k.P.drive * 5 | 0)]);   // 迷路：歪み → タイルの大きさ
+  gl.uniform1f(U.uThick, 1 + Math.round(k.P.res * 2));          // レゾナンス → 線の太さ
+  gl.uniform1f(U.uTh, 0.7 - grow * 0.45);                       // カットオフ（LFO 込み）→ しきい値（開くと白があふれる）
+  gl.uniform1f(U.uLines, 2 + Math.round(k.P.res * 6));          // レゾナンス → 等高線の本数
+  gl.uniform1f(U.uScale, 1.2 + Math.log2(k.drive) * 0.5);       // 歪み → 島の細かさ
+  flow += Math.max(0, Math.min(0.1, t - lastT)) * (0.08 + k.lfoR * 0.25); lastT = t;   // LFO の速さ → ノイズが流れる速さ（1秒あたり）
+  gl.uniform1f(U.uGap, 0.025 + shape * 0.035);                 // 混ぜ具合 → 等高線の間隔
+  gl.uniform1f(U.uFlow, flow); gl.uniform1f(U.uOn, ac && k.tau > 0.05 ? k.gate : 1);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const now = FB.ring[FB.head].tex;
+  if (newTick) {   // 残響：30コマ/秒で1回進める
+    gl.useProgram(PR.o); const src = FB.rev[FB.r], dst = FB.rev[1 - FB.r]; FB.r = 1 - FB.r;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fb); bindTex(1, now); bindTex(2, src.tex);
+    gl.uniform1i(PR.u.uNow, 1); gl.uniform1i(PR.u.uPrev, 2); gl.uniform2f(PR.u.uN, FB.w, FB.h);
+    gl.uniform1f(PR.u.uKeep, ac ? Math.min(0.88, k.rv * (0.5 + k.rvl * 0.38)) * (vw === 'c' ? 0.5 : 1) : 0); gl.uniform1f(PR.u.uTick, tick % 997);   // リバーブの量・長さ → ドットが残る割合
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  gl.useProgram(PO.o); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, c.width, c.height);
+  const D = Math.max(1, Math.round(k.dly * 30));                 // ディレイの時間 → こだまの間隔（コマ）
+  bindTex(1, now); bindTex(2, FB.rev[FB.r].tex); gl.uniform1i(PO.u.uNow, 1); gl.uniform1i(PO.u.uRev, 2);
+  for (let j = 1; j <= 5; j++) { bindTex(2 + j, FB.ring[(FB.head - j * D + RING * 10) % RING].tex); gl.uniform1i(PO.u['uE' + j], 2 + j); }
+  gl.uniform2f(PO.u.uRes, c.width, c.height); gl.uniform2f(PO.u.uN, FB.w, FB.h);
+  gl.uniform1f(PO.u.uEn, ac ? Math.min(5, Math.floor(1 + k.P.dfb * 4.99)) : 0); gl.uniform1f(PO.u.uFb, k.dfb);   // ディレイの戻り → こだまの数・残り具合
+  gl.uniform2f(PO.u.uShift, 0, Math.round(1 + k.P.dly * 5)); gl.uniform1f(PO.u.uTick, tick % 997);                // こだまは下へずれる
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  hud.textContent = ac ? `${s.kind} ${s.type}  ${k.tau.toFixed(1)}/${s.len.toFixed(1)}s\ncut ${k.cut | 0}Hz  Q ${k.q.toFixed(1)}  drive ${k.drive.toFixed(1)}\nmix ${k.mix.toFixed(2)}  comb ${k.comb | 0}Hz\nLFO ${k.lfoR.toFixed(1)}Hz x ${k.lfoD.toFixed(2)}oct\nenv ${k.env.toFixed(2)}  fb ${k.fb.toFixed(2)}\ndelay ${(k.dly * 1000) | 0}ms x ${k.dfb.toFixed(2)}  reverb ${k.rv.toFixed(2)} / ${k.rvl.toFixed(2)}` : '';
+}
+
+setSize(); frame();
+document.getElementById('aspect').onchange = setSize;
+document.getElementById('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+
+const restart = () => { if (ac) { ac.close(); ac = null; oscs = []; audSec = -1; } startAudio(); };
+// 試す：音色を選ぶ・動きを作り直すと、頭から鳴り直す
+let seed = 22;
+const retry = () => { setTempo(document.getElementById('tempo').value); build(document.getElementById('kind').value, seed); restart(); };
+document.getElementById('tempo').value = tempoQ; document.getElementById('tempo').onchange = retry;
+document.getElementById('kind').onchange = retry;
+document.getElementById('reroll').onclick = () => { seed++; retry(); };
+document.getElementById('view').onchange = () => { if (!ac) startAudio(); };
+document.getElementById('rec').onclick = e => {
+  if (ac) { ac.close(); ac = null; oscs = []; audSec = -1; }   // 頭から録る
+  startAudio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(window.lastBlob = new Blob(chunks, { type }));
+    a.download = `frost_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+</script>
+</body>
+</html>
