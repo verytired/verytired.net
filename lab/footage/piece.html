@@ -55,6 +55,7 @@ const LOOK = [
 ];
 for (let i = 14; i < 28; i++) LOOK.push(LOOK[(i * 5) % 14]);   // 2周目は順番を混ぜる
 for (let i = 0; i < 8; i++) LOOK.push({ pal: 1 + i % 4, warp: 0.6, drip: 1, edge: i % 2, strip: i % 3 === 2 ? 3 : 0 });
+const HARD = [3, 7, 8, 12, 17, 21, 22, 26];   // ハードな VHS のノイズで崩すカット
 const cutAt = tl => { let k = 0; while (k + 1 < CUTS.length && CUTS[k + 1] <= tl + 1e-4) k++; return k; };
 
 // ---- 譜面：音も映像もここから読む ----
@@ -241,7 +242,7 @@ void main() {
 }`;
 // 3枚目：ブラウン管とテープ。明るさは少し、色は大きく横にぼかして右へずらす、赤と青を割る、テープの乱れ、走査線と格子、ノイズ、周辺の暗さ（018 fold の仕上げ）
 const POST_FS = COMMON + `
-uniform sampler2D acc, osd; uniform vec2 res; uniform float t, S, ca, track, flash, inv; uniform uint seed;
+uniform sampler2D acc, osd; uniform vec2 res; uniform float t, S, ca, track, flash, inv, hard; uniform uint seed, hseed;
 out vec4 o;
 vec3 rd(vec2 q) { return texture(acc, q / res).rgb; }
 float Yof(vec3 c) { return dot(c, vec3(.299, .587, .114)); }
@@ -254,7 +255,24 @@ void main() {
   jit += pow(max(0., yb - .93) / .07, 2.) * 22. * u * sin(t * 9.);   // 上の端が左右に曲がる
   float band = fract(t * 2. / 15. + .2), inBand = smoothstep(.035, 0., abs(yb - band));   // ゆっくり上がる乱れの帯（15秒で2周）
   jit += inBand * 40. * u * track;
+  // ハードなノイズ：縦の同期が外れて、画面が太い横の帯に割れて転がる。帯ごとに縦の位置がずれ、境目は黒い帰線と細い明るい線
+  float blank = 0., bline = 0., lh = 0.;
+  if (hard > .01) {
+    uint hb = pcg(hseed * 3u); float nb = 3. + floor(h1(hb) * 3.), roll = h1(hb) + t * (h1(hb) - .5) * 1.5;
+    float q = yb * nb + roll, k = floor(q), f = fract(q);
+    uint hk = pcg(uint(k + 99.) * 197u ^ hseed); p.y += (h1(hk) - .5) * res.y * .9 * hard;
+    float bw = .06 + .12 * h1(hk); blank = step(f, bw) * step(.35, hard); bline = smoothstep(.012, 0., abs(f - bw)) * blank;
+    float amp = res.x * (.06 + .3 * h1(hk)) * hard, fq = (2. + 9. * h1(hk)) * 6.2832 / res.y;   // うねり：帯ごとに、縦の位置で左右に大きく波打たせる（ゆっくり流れる）
+    jit += amp * sin(p.y * fq + t * (1. + 3. * h1(hk)) + h1(hk) * 6.) + amp * (vn(vec2(p.y / (70. * u), t * 2. + k)) - .5) * 1.4;
+    uint hr = pcg(uint(p.y / (3. * u)) * 7919u ^ hseed); lh = h1(hr);   // 行ごとの裂け：ときどき大きく横へ
+    if (lh < .3 * hard) jit += (h1(hr) - .5) * 700. * u * hard;
+  }
   p.x += jit;
+  if (hard > .01) {   // 横に引き伸ばす：何本かの行をまとめた帯ごとに、ある点を中心に絵を横へ数倍〜数十倍に伸ばす
+    uint hg = pcg(uint(p.y / (22. * u)) * 6271u ^ hseed * 11u); float sub = 2. + floor(h1(hg) * 6.);
+    uint hs = pcg(uint(p.y / (22. * u / sub)) * 15013u ^ hseed * 17u);
+    if (h1(hg) < .5 * hard) { float ax = h1(hs) * res.x, sc = mix(1., .2 + .4 * h1(hs), hard); p.x = ax + (p.x - ax) * sc; }
+  }
   // テープは明るさの解像度が低く、色はもっと低い。色は明るさより遅れて右へずれる
   vec3 lum = vec3(0), wide = vec3(0), chr = vec3(0);
   for (int i = -4; i <= 4; i++) lum += rd(p + vec2(float(i) * 1.8 * u, 0));
@@ -268,7 +286,7 @@ void main() {
   C += (vec3(h1(hc), h1(hc), h1(hc)) - .5) * .12;
   vec3 col = Y + C * .95;
   col = col * .88 + .06;   // 黒が浮き、白が沈む
-  col *= .82 + .18 * sin(gl_FragCoord.y * 3.1416 / (2.5 * u));   // 走査線
+  col *= mix(.82 + .18 * sin(gl_FragCoord.y * 3.1416 / (2.5 * u)), 1., hard * .8);   // 走査線（ハードな所は点に替わるので弱める）
   float m = mod(gl_FragCoord.x / u, 3.); col *= vec3(m < 1. ? 1.08 : .92, m >= 1. && m < 2. ? 1.08 : .92, m >= 2. ? 1.08 : .92);   // 蛍光体の縦の格子
   col += .2 * max(lum - .6, 0.);   // 明るい所のにじみ
   uint hn = pcg(uint(gl_FragCoord.x) * 1973u ^ uint(gl_FragCoord.y) * 9277u ^ seed); float nz = h1(hn);
@@ -276,6 +294,23 @@ void main() {
   col = mix(col, vec3(nz * .9), clamp(head * .7 + inBand * .5 * track, 0., 1.));   // 下の端と乱れの帯は砂嵐になる
   uint hd = pcg(uint(p.y / (2. * u)) * 911u ^ seed * 13u);   // ドロップアウト：ときどき短い白い横すじ
   if (h1(hd) < .0015 * (1. + 4. * track)) { float x0 = h1(hd) * res.x * 200., ln = (20. + 160. * h1(hd)) * u; if (abs(mod(p.x - x0, res.x) - ln * .5) < ln * .5) col = mix(col, vec3(.95), .85); }
+  if (hard > .01) {
+    float Yh = Yof(col);
+    float Yb = clamp((Yh - .1) * 2.6, 0., 1.);   // 白が飛ぶ（明るさだけを強める）
+    col = mix(col, clamp(vec3(Yb * .75, Yb * 1.05, Yb * 1.15) + vec3(0, .02, .05), 0., 1.), .9 * hard);   // 色はシアンに褪せる
+    uint hl2 = pcg(uint(gl_FragCoord.y / (5. * u)) * 4451u ^ hseed * 5u);
+    vec2 cell = vec2(16., 10.) * u, g = gl_FragCoord.xy / cell; g.x += h1(hl2);   // 絵が楕円の点の集まりになる：行ごとに点の位置をずらし、明るい所ほど点が大きく、つながる
+    vec2 lc = (fract(g) - .5) * vec2(1., 1.25); float rad = .1 + .5 * Yb, dm = smoothstep(rad, rad - .1, length(lc));
+    col *= mix(1., dm * 1.25, .9 * hard);
+    float snow = step(1. - .02 * hard, nz) * step(Yh, .25); col = max(col, vec3(snow));   // 黒地のまばらな白い点
+    if (h1(hl2) < .025 * hard) col = mix(col, vec3(1), .8);   // 幅いっぱいの白い横すじ
+    uint hp = pcg(uint(gl_FragCoord.x / (9. * u)) * 31u ^ uint(gl_FragCoord.y / (9. * u)) * 977u ^ hseed);
+    if (Yh < .2 && h1(hp) < .012 * hard) col += vec3(h1(hp) > .5 ? .9 : .2, h1(hp) > .3 ? .7 : .1, .9) * .8;   // 赤・緑・青の色の点
+    float tail = 0.;   // 明るい所が右へ長く尾を引く（テープの輝度のにじみ）
+    for (int i = 1; i <= 16; i++) { float y = Yof(rd(p - vec2(float(i) * 14. * u * hard, 0))); tail = max(tail, smoothstep(.55, .9, y) * (1. - float(i) / 17.)); }
+    col = max(col, vec3(.8, .97, 1.) * tail * hard);
+    col = mix(col, vec3(0), blank * (1. - bline)); col = mix(col, vec3(.95), bline * .8);
+  }
   vec2 v = gl_FragCoord.xy / res - .5; col *= 1. - dot(v, v) * 1.1;
   col = mix(col, vec3(nz), flash);
   if (inv > .5) col = 1. - col;
@@ -355,6 +390,9 @@ function frame() {
     gl.uniform1f(P_POST.u('flash'), 0.35 * xHit * roll);
     gl.uniform1f(P_POST.u('inv'), roll > 0.75 && sHit > 0.6 ? 1 : 0);
     gl.uniform1ui(P_POST.u('seed'), frameN);
+    // ハードなノイズ：決めたカットはずっと、ほかは心音で一瞬。最後の小節は全開。帯の割れ方は2コマごとに変わる
+    const hard = Math.min(1, (HARD.includes(k) ? 0.75 + 0.25 * kHit : 0.35 * kHit ** 2) + roll);
+    gl.uniform1f(P_POST.u('hard'), hard); gl.uniform1ui(P_POST.u('hseed'), (k * 131 + (frameN >> 1)) >>> 0);
   });
 }
 
