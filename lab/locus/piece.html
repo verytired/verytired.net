@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Locus</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="900" value="15"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<script>
+// 15秒（128 BPM の8小節）のループ。絵も音も同じ表（遺伝子・配列・ビット・星）から作る
+const BPM = 128, BEAT = 60 / BPM, BAR = BEAT * 4, LOOP = BAR * 8;
+const SEC = { A: 0, B: BAR * 2, C: BAR * 4, D: BAR * 5, E: BAR * 7, F: BAR * 7.75 };
+const rng = s => () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const R = rng(24), ri = n => R() * n | 0, pick = a => a[ri(a.length)];
+const EV = [];   // 音の出来事 {t, k, ...}。絵も同じものを見る
+const ev = (t, k, o = {}) => EV.push({ t, k, ...o });
+
+// ---- A：遺伝子地図。2回の走査（1小節ずつ）、32分の枠ごとに遺伝子を置き、カーソルが通ると鳴る
+const SLOT = BAR / 32, ROWS = 8;   // 縦長は8段、ほかは4段に畳む
+const AL = 'ABCDEFGHIKLMNPRSTVWXZ', geneName = () => R() < 0.4 ? 'LOC' + (100000 + ri(900000)) : pick(AL) + pick(AL) + pick(AL) + (R() < 0.7 ? 1 + ri(40) : '') + (R() < 0.3 ? pick(AL) : '');
+const PITCH = [1046, 1568, 2093, 3136, 4186, 6272, 8372];
+const SWEEPS = [0, 1].map(s => {
+  const genes = [];
+  for (let i = 0; i < 32; i++) if (R() < (s ? 0.9 : 0.7)) {
+    const row = ri(ROWS), n = 2 + ri(5);
+    for (let j = 0; j < n; j++) genes.push({ x: (i + R() * 0.9) / 32, w: (0.2 + R() * (s ? 0.6 : 1.4)) / 32, row, name: geneName(), up: R() < 0.5 });
+    ev(s * BAR + i * SLOT, 'ping', { f: PITCH[(row * 3 + s + ri(2)) % 7], d: 0.035, g: 0.22 });
+  }
+  for (let i = 0; i < 32; i++) ev(s * BAR + i * SLOT, 'click', { g: i % 4 ? 0.25 : 0.6 });
+  return { genes, base: 38000 + ri(140000), span: s ? 1200 : 9600 };
+});
+for (let b = 0; b < 4; b++) ev(b * BEAT * 2, 'kick');
+ev(0, 'noise', { d: 0.06, g: 0.5 });
+
+// ---- B：塩基配列。64分音符ごとに1塩基、塩基ごとの高さのサイン波をそのまま鳴らす
+const BASES = 'ACGT', BF = { A: 587, C: 880, G: 1175, T: 1760 }, BD = BAR / 64;
+const SEQ = Array.from({ length: 160 }, () => pick(BASES)).join('');
+const OTHER = Array.from({ length: 9 }, () => Array.from({ length: 400 }, () => pick(BASES)).join(''));
+ev(SEC.B, 'seq', { n: 128 });
+for (let b = 0; b < 4; b++) ev(SEC.B + b * BEAT * 2, 'kick');
+for (let i = 0; i < 16; i++) ev(SEC.B + BAR + i * BAR / 16, 'click', { g: 0.5 });
+
+// ---- C：ビットの縞。16分ごとに並びを替え、1行目のビットでノイズを開け閉めする
+// 1行 256 ビット。行ごとに濃さが違い、まばらな点線になる
+const BITS = Array.from({ length: 24 }, (_, i) => { const r = rng(900 + i); return { rows: Array.from({ length: 96 }, () => { const d = Math.pow(r(), 2) * 0.6, a = new Uint8Array(256); let on = 0; for (let k = 0; k < 256; k++) { if (r() < (on ? 0.35 : d * 0.5)) on ^= 1; a[k] = on; } return a; }), speed: Array.from({ length: 96 }, () => 0.3 + r() * r() * 3), band: ri(2) }; });
+for (let i = 0; i < 24; i++) {
+  const t = SEC.C + (i < 12 ? i * BAR / 16 : BAR * 0.75 + (i - 12) * BAR / 48);
+  ev(t, 'bits', { i }); ev(t, 'ping', { f: i % 2 ? 12543 : 8372, d: 0.012, g: 0.18 });
+}
+for (let b = 0; b < 4; b++) ev(SEC.C + b * BEAT, 'kick');
+for (let k = 0; k < 4; k++) ev(SEC.C + BAR * 0.75 + k * BAR / 16, 'kick');   // 最後の1拍は16分でキックを連打
+ev(SEC.C, 'noise', { d: 0.05, g: 0.7 });
+ev(SEC.C, 'noise', { d: SEC.D - SEC.C, g: 0.3, hp: 2500 });   // 下に敷くヒス
+ev(SEC.C - 0.005, 'comp', { th: 0, ra: 1 }); ev(SEC.D - 0.005, 'comp', { th: -8, ra: 6 });   // ビットの縞だけ圧縮を外して、ほかより大きく鳴らす
+
+// ---- D：星表。点群をまわり、拍ごとに1つずつ星に名前と座標を出す
+const GREEK = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda', 'Mu', 'Nu', 'Xi', 'Omicron', 'Sigma', 'Tau', 'Upsilon'];
+const CONS = ['Ursae Majoris', 'Draconis', 'Hydrae', 'Geminorum', 'Eridani', 'Cygni', 'Lyrae', 'Orionis', 'Centauri', 'Aquilae', 'Cassiopeiae', 'Scorpii', 'Tauri', 'Leonis'];
+const gauss = () => Math.sqrt(-2 * Math.log(R() + 1e-9)) * Math.cos(6.283 * R());
+const STARS = Array.from({ length: 3200 }, (_, i) => i < 2000 ? [gauss() * 0.22, gauss() * 0.12, gauss() * 0.22] : [R() * 4 - 2, R() * 2 - 1, R() * 4 - 2]);
+const LABELS = Array.from({ length: 14 }, (_, i) => {
+  const s = STARS[ri(STARS.length)], f = (a, b, d = 1) => (a + R() * (b - a)).toFixed(d), cls = pick('OBAFGKM') + ri(10) + pick(['V', 'III', 'II', 'IV', 'Ib']);
+  const am = f(-1, 6, 2);
+  return { s, t: SEC.D + (i < 8 ? i * BEAT : BEAT * 8 - (14 - i) * BEAT / 4 - BEAT / 2), lines: [pick(GREEK) + ' ' + pick(CONS), `Equatorial Coordinates  ra:${f(0, 24, 2)} dec:${f(-60, 60)}`, `Galactic Coordinates  l:${f(0, 360)} b:${f(-40, 40)}`, `distance:${f(40, 900, 0)}`, `the spectral classification:${cls}`, `apparent magnitude:${am}`, `absolute magnitude:${f(-6, 3, 2)}`, `prllx:${f(1, 60, 2)}  error:${f(0.2, 2, 2)}`], f: 2000 * Math.pow(2, (6 - am) / 2.5) };
+});
+LABELS.forEach(l => ev(l.t, 'ping', { f: Math.min(12000, l.f), d: 0.06, g: 0.2 }));
+ev(SEC.D, 'drone', { d: SEC.E - SEC.D });
+ev(SEC.D, 'kick'); ev(SEC.D + BAR, 'kick');
+ev(SEC.D, 'noise', { d: 0.03, g: 0.5 });
+
+// ---- E：線の投影。点群を通る直線をのばし、上がる音とともに白へ飽和、黒で切る
+const RAYS = Array.from({ length: 1400 }, () => { const p = STARS[ri(2000)], a = R() * 6.283, z = R() * 2 - 1, q = Math.sqrt(1 - z * z); return [p, [q * Math.cos(a), z, q * Math.sin(a)]]; });
+const INV = SEC.E + BEAT * 2;   // ここで白地に反転
+ev(SEC.E, 'sweep', { d: SEC.F - SEC.E }); ev(SEC.E, 'kick');
+ev(INV, 'noise', { d: SEC.F - INV, g: 0.35, hp: 3000 }); ev(INV, 'kick');
+ev(SEC.F, 'click', { g: 1 });
+EV.sort((a, b) => a.t - b.t);
+
+// ---- 音
+let ac = null, out, comp, audioDest, T0 = 0, schedLoop = 0, schedI = 0, schedId, noiseBuf, seqBuf;
+const startAudio = () => {
+  if (ac) return;
+  ac = new AudioContext();
+  out = ac.createGain(); out.gain.value = 0.55;
+  comp = ac.createDynamicsCompressor(); comp.threshold.value = -8; comp.ratio.value = 6;
+  out.connect(comp); comp.connect(ac.destination);
+  audioDest = ac.createMediaStreamDestination(); comp.connect(audioDest);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  // 配列の音：塩基ごとのサイン波を、継ぎ目でぷつっと切れるまま並べる
+  const sr = ac.sampleRate, nb = Math.round(BD * sr); seqBuf = ac.createBuffer(1, nb * 128, sr);
+  const sd = seqBuf.getChannelData(0);
+  for (let i = 0; i < 128; i++) { const f = BF[SEQ[i]]; for (let j = 0; j < nb; j++) sd[i * nb + j] = 0.22 * Math.sin(6.283 * f * j / sr) + (j < 3 ? 0.4 : 0); }
+  T0 = ac.currentTime + 0.05; schedLoop = 0; schedI = 0;
+  clearInterval(schedId);
+  schedId = setInterval(() => {
+    const ahead = ac.currentTime + 0.3;
+    for (;;) {
+      const e = EV[schedI], at = T0 + schedLoop * LOOP + e.t;
+      if (at > ahead) break;
+      if (at >= ac.currentTime - 0.01) play(e, at);
+      if (++schedI >= EV.length) { schedI = 0; schedLoop++; }
+    }
+  }, 50);
+};
+const env = (at, d, g) => { const n = ac.createGain(); n.gain.setValueAtTime(0, at); n.gain.linearRampToValueAtTime(g, at + 0.0005); n.gain.setValueAtTime(g, at + d); n.gain.linearRampToValueAtTime(0, at + d + 0.001); n.connect(out); return n; };
+const play = (e, at) => {
+  if (e.k === 'comp') { comp.threshold.setValueAtTime(e.th, at); comp.ratio.setValueAtTime(e.ra, at); }
+  if (e.k === 'ping') { const o = ac.createOscillator(); o.frequency.value = e.f; o.connect(env(at, e.d, e.g)); o.start(at); o.stop(at + e.d + 0.01); }
+  if (e.k === 'click') { const b = ac.createBufferSource(), buf = ac.createBuffer(1, 4, ac.sampleRate); buf.getChannelData(0).set([1, -1, 0.5, -0.5]); b.buffer = buf; const g = ac.createGain(); g.gain.value = e.g; b.connect(g); g.connect(out); b.start(at); }
+  if (e.k === 'kick') { const o = ac.createOscillator(), g = ac.createGain(); o.frequency.setValueAtTime(160, at); o.frequency.exponentialRampToValueAtTime(42, at + 0.08); g.gain.setValueAtTime(1, at); g.gain.exponentialRampToValueAtTime(0.001, at + 0.35); o.connect(g); g.connect(out); o.start(at); o.stop(at + 0.4); }
+  if (e.k === 'noise') { const b = ac.createBufferSource(), f = ac.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = e.hp || 200; b.buffer = noiseBuf; b.loop = true; b.connect(f); f.connect(env(at, e.d, e.g)); b.start(at); b.stop(at + e.d + 0.01); }
+  if (e.k === 'seq') { const b = ac.createBufferSource(); b.buffer = seqBuf; b.connect(out); b.start(at); }
+  if (e.k === 'bits') {   // いちばん濃い行のビットを 16 個おきに拾い、16分の中で16回ノイズを開け閉め
+    const row = BITS[e.i].rows.reduce((a, r) => r.reduce((x, y) => x + y) > a.reduce((x, y) => x + y) ? r : a), step = (e.i < 12 ? BAR / 16 : BAR / 48) / 16;
+    const buzz = BITS[e.i].rows[1];
+    for (let j = 0; j < 16; j++) {
+      const a = at + j * step;
+      if (row[j * 16]) { const b = ac.createBufferSource(); b.buffer = noiseBuf; b.connect(env(a, step * 0.85, 0.75)); b.start(a, Math.random()); b.stop(a + step); }
+      if (buzz[j * 16]) { const o = ac.createOscillator(); o.type = 'square'; o.frequency.value = 55 * (1 + (e.i % 3)); o.connect(env(a, step * 0.85, 0.3)); o.start(a); o.stop(a + step); }
+    }
+  }
+  if (e.k === 'drone') for (const [f, g] of [[55, 0.3], [3520, 0.05], [3523, 0.05]]) { const o = ac.createOscillator(); o.frequency.value = f; o.connect(env(at, e.d, g)); o.start(at); o.stop(at + e.d + 0.01); }
+  if (e.k === 'sweep') { const o = ac.createOscillator(), n = env(at, e.d, 0.25); o.frequency.setValueAtTime(110, at); o.frequency.exponentialRampToValueAtTime(14000, at + e.d); o.connect(n); o.start(at); o.stop(at + e.d + 0.01); }
+};
+
+// ---- 絵
+const c = document.getElementById('c'), x = c.getContext('2d');
+let W, H, U;   // U は文字の大きさの単位
+const setSize = () => { [W, H] = document.getElementById('aspect').value.split('x').map(Number); c.width = W; c.height = H; U = W / 100; };
+const mono = s => (x.font = `${Math.round(s)}px Menlo, ui-monospace, monospace`);
+
+const ruler = (y, base, span, flip) => {
+  x.fillStyle = x.strokeStyle = '#999'; mono(U * 0.85); x.lineWidth = 1;
+  x.beginPath(); x.moveTo(0, y); x.lineTo(W, y);
+  for (let i = 0; i <= 40; i++) { const px = i / 40 * W; x.moveTo(px, y); x.lineTo(px, y + (flip ? -1 : 1) * (i % 5 ? U * 0.4 : U * 0.9)); }
+  x.stroke();
+  for (let i = 0; i < 8; i++) x.fillText(Math.round(base + span * i / 8).toLocaleString('en') + 'kb', i / 8 * W + 2, y + (flip ? -U * 1.2 : U * 1.8));
+};
+
+const drawGenome = tau => {
+  const s = tau < BAR ? 0 : 1, sw = SWEEPS[s], p = (tau - s * BAR) / BAR, cx = p * W;
+  const vis = H > W * 1.4 ? 8 : 4, rowH = H / vis, bh = U * 0.9;
+  ruler(U * 0.2, sw.base, sw.span * (1 - p * 0.5), false); ruler(H - U * 0.2, sw.base + sw.span * 0.5, sw.span * (1 - p * 0.5), true);
+  for (let r = 0; r < vis; r++) {
+    const cy = rowH * (r + 0.5), gs = sw.genes.filter(g => g.row % vis === r).sort((a, b) => a.x - b.x);
+    x.fillStyle = '#555'; x.fillRect(0, cy - 0.5, W, 1);
+    mono(U * 1.05);
+    for (const up of [true, false]) {   // ラベルは重ならないように右へ押し出し、引き出し線を扇にする
+      let last = -1e9;
+      for (const g of gs.filter(g => g.up === up)) {
+        const gx = (g.x + g.w / 2) * W, lx = Math.max(gx, last + U * 1.25); last = lx; g.lx = lx;
+        const lit = cx >= g.x * W && cx <= (g.x + g.w) * W + U * 3, d = up ? -1 : 1;
+        x.strokeStyle = lit ? '#48f' : '#aaa'; x.lineWidth = lit ? 2 : 1;
+        x.beginPath(); x.moveTo(gx, cy + d * bh); x.lineTo(gx, cy + d * rowH * 0.12); x.lineTo(lx, cy + d * rowH * 0.2); x.lineTo(lx, cy + d * rowH * 0.23); x.stroke();
+        x.save(); x.translate(lx + U * 0.35, cy + d * rowH * 0.24); x.rotate(-Math.PI / 2); x.textAlign = up ? 'left' : 'right';
+        x.fillStyle = lit ? '#48f' : '#ddd'; x.fillText(g.name, 0, 0); x.restore();
+      }
+    }
+    for (const g of gs) { const lit = cx >= g.x * W && cx <= (g.x + g.w) * W + U * 3; x.fillStyle = lit ? '#48f' : '#fff'; x.fillRect(g.x * W, cy - bh * (g.up ? 1 : 0.6), Math.max(2, g.w * W), bh * 1.6); }
+  }
+  x.fillStyle = '#36f'; x.fillRect(cx - 1, 0, 3, H);
+};
+
+const drawSeq = tau => {
+  const cur = tau / BD, groups = Math.max(3, Math.round(H / W * 4)), gh = H / groups, cx = W * 0.5;
+  ruler(U * 0.2, 41200 + Math.floor(cur), 64, false);
+  for (let gI = 0; gI < groups; gI++) {
+    const z = [1, 0.5, 2, 0.25][gI % 4], cw = U * 1.6 * z, top = gh * gI + U * 3, pos = cur * (gI ? z * 1.5 : 1);
+    mono(cw * 1.6); x.textAlign = 'center';
+    for (let line = 0; line < 3; line++) {
+      const str = gI === 0 && line === 0 ? SEQ : OTHER[(gI * 3 + line) % 9], y = top + line * cw * 1.9;
+      for (let k = -Math.ceil(cx / cw) - 1; k <= Math.ceil(cx / cw) + 1; k++) {
+        const i = Math.floor(pos) + k; if (i < 0 || i >= str.length) continue;
+        const px = cx + (i - pos) * cw + cw / 2, on = gI === 0 && line === 0 && i === Math.floor(cur) && cur < 128;
+        if (on) { x.fillStyle = '#fff'; x.fillRect(px - cw / 2, y - cw * 1.4, cw, cw * 1.8); }
+        x.fillStyle = on ? '#000' : i < pos ? '#777' : '#eee'; x.fillText(str[i], px, y);
+      }
+    }
+    // 波形：塩基の高さのサイン波（見える速さに落とす）
+    const wy = top + cw * 7, amp = gh * 0.07, str = gI === 0 ? SEQ : OTHER[gI % 9];
+    x.strokeStyle = '#ddd'; x.lineWidth = 1; x.beginPath();
+    for (let px = 0; px < W; px += 1) { const i = Math.floor(pos + (px - cx) / cw), ch = str[Math.max(0, Math.min(str.length - 1, i))]; x.lineTo(px, wy + amp * Math.sin(px * BF[ch] / 3000 * (1 / z))); }
+    x.stroke();
+    // 棒グラフ：8塩基ごとの GC の割合
+    const by = wy + amp * 3.2;
+    x.fillStyle = '#888';
+    for (let px = 0; px < W; px += cw) { const i = Math.floor(pos + (px - cx) / cw); let gc = 0; for (let j = 0; j < 8; j++) gc += 'GC'.includes(str[(i + j + 4000) % str.length]); x.fillRect(px, by - gc / 8 * gh * 0.18, cw * 0.6, gc / 8 * gh * 0.18); }
+    x.fillStyle = '#555'; x.fillRect(0, by, W, 1);
+  }
+  x.textAlign = 'left';
+  x.fillStyle = '#f22'; x.fillRect(cx - 1, 0, 2, H);
+};
+
+// 行ごとに違う速さで横に流れる点線、灰色の帯、白いノイズの柱。拍で反転、最後の1拍は毎コマ反転して行を裂く
+const drawBits = tau => {
+  let i = 0, ti = 0; for (const e of EV) if (e.k === 'bits' && e.t <= SEC.C + tau) { i = e.i; ti = e.t - SEC.C; }
+  const b = BITS[i], rows = Math.round(H / (W / 64)), rh = H / rows, cw = W / 256, fr = Math.floor(tau * 30), rush = tau >= BAR * 0.75;
+  const inv = (tau % BEAT) < 1 / 15 || (rush && fr % 2) || tau - ti < 1 / 60, fg = inv ? '#000' : '#fff';
+  x.fillStyle = inv ? '#fff' : '#000'; x.fillRect(0, 0, W, H);
+  for (let r = 0; r < rows; r++) {
+    const q = rng(fr * 131 + r), y = r * rh;
+    if (((r >> 1) + b.band) % 2) { x.fillStyle = inv ? '#aaa' : '#5a5a5a'; x.fillRect(0, y, W, rh); }
+    // 並びは場面のあいだ固定（BITS[0]）で、どの行も左から右へ流れる。最後の1拍は3倍速。速い行ほど線を伸ばす
+    const row = BITS[0].rows[r % 96], sp = BITS[0].speed[r % 96] * W, tear = rush && q() < 0.3 ? (q() - 0.5) * W : 0;
+    const off = (((tau + Math.max(0, tau - BAR * 0.75) * 2) * sp + tear) % W + W) % W, streak = sp * (rush ? 3 : 1) / 30 * 0.35;
+    x.fillStyle = fg;
+    for (let k = 0; k < 256; k++) if (row[k]) { const px = (k * cw + off) % W; x.fillRect(px - streak, y + rh * 0.35, cw * 1.05 + streak, rh * 0.25); if (px - streak < 0) x.fillRect(px - streak + W, y + rh * 0.35, cw * 1.05 + streak, rh * 0.25); }
+  }
+  // 白いノイズの柱（行ごとに横へばらつく）
+  const cols = rush ? 5 : 2;
+  for (let k = 0; k < cols; k++) {
+    const cx = ((tau * (900 + k * 700) + k * W / cols) % W);
+    for (let r = 0; r < rows; r++) { const q = rng(fr * 977 + k * 61 + r); x.fillStyle = fg; for (let n = 0; n < 9; n++) x.fillRect(cx + (q() - 0.5) * U * 6 * q(), r * rh + q() * rh, U * (0.4 + q() * q() * 4), 2); }
+  }
+};
+
+const cam = (yaw, pitch, dist) => {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch), f = Math.max(W, H) * 0.55;
+  return p => { const X = p[0] * cy - p[2] * sy, Z0 = p[0] * sy + p[2] * cy, Y = p[1] * cp - Z0 * sp, Z = p[1] * sp + Z0 * cp + dist; return Z > 0.05 ? [W / 2 + X / Z * f, H / 2 - Y / Z * f, Z] : null; };
+};
+
+const drawStars = (tau, white) => {
+  const P = cam(0.6 + tau * 0.35 + tau * tau * 0.04, 0.32 + tau * 0.03, 3.2 - tau * 0.32);
+  // 床の点の格子と軸
+  x.fillStyle = white ? '#bbb' : '#334';
+  for (let i = -20; i <= 20; i++) for (let j = -20; j <= 20; j++) { const q = P([i * 0.1, -0.9, j * 0.1]); if (q) x.fillRect(q[0], q[1], 2, 2); }
+  x.strokeStyle = white ? '#888' : '#24a'; x.lineWidth = 1; x.beginPath();
+  for (const a of [[[-3, 0, 0], [3, 0, 0]], [[0, -3, 0], [0, 3, 0]], [[0, 0, -3], [0, 0, 3]], [[-2, -0.9, -2], [2, -0.9, -2]], [[-2, -0.9, 2], [2, -0.9, 2]]]) { const p = P(a[0]), q = P(a[1]); if (p && q) { x.moveTo(p[0], p[1]); x.lineTo(q[0], q[1]); } }
+  x.stroke();
+  x.fillStyle = white ? '#e22' : '#fff';
+  for (const s of STARS) { const q = P(s); if (q) { const r = Math.max(1, 3.2 / q[2]); x.fillRect(q[0], q[1], r, r); } }
+  return P;
+};
+
+const drawLabels = (tau, P) => {
+  mono(U * 1.15);
+  for (const l of LABELS) {
+    if (SEC.D + tau < l.t) continue;
+    const q = P(l.s); if (!q) continue;
+    const age = SEC.D + tau - l.t, n = Math.min(l.lines.length, Math.floor(age / 0.012) + 1);
+    x.strokeStyle = '#f33'; x.lineWidth = 2; x.beginPath(); x.moveTo(q[0] - U, q[1]); x.lineTo(q[0] + U, q[1]); x.moveTo(q[0], q[1] - U); x.lineTo(q[0], q[1] + U); x.stroke();
+    if (age < 0.05) { x.fillStyle = '#fff'; x.fillRect(q[0] - U * 2, q[1] - U * 2, U * 4, U * 4); }
+    x.fillStyle = '#fff';
+    for (let k = 0; k < n; k++) { x.font = `${k ? '' : 'bold '}${Math.round(U * 1.15)}px Menlo, ui-monospace, monospace`; x.fillText(l.lines[k], q[0] + U * 1.6, q[1] + U * 0.4 + k * U * 1.45); }
+  }
+};
+
+const drawRays = tau => {
+  const white = SEC.E + tau >= INV, k = tau / (SEC.F - SEC.E);
+  x.fillStyle = white ? '#fff' : '#000'; x.fillRect(0, 0, W, H);
+  const P = drawStars(BAR * 2 + tau * 2.5, white);
+  const n = Math.floor(RAYS.length * Math.min(1, 0.15 + k * 1.2)), L = 0.3 + k * 14;
+  x.strokeStyle = white ? 'rgba(0,0,0,0.18)' : `rgba(255,255,255,${0.12 + k * 0.35})`; x.lineWidth = 1; x.beginPath();
+  for (let i = 0; i < n; i++) { const [p, d] = RAYS[i], a = P([p[0] - d[0] * L, p[1] - d[1] * L, p[2] - d[2] * L]), b = P([p[0] + d[0] * L, p[1] + d[1] * L, p[2] + d[2] * L]); if (a && b) { x.moveTo(a[0], a[1]); x.lineTo(b[0], b[1]); } }
+  x.stroke();
+};
+
+const hud = t => {
+  mono(U * 0.9); x.fillStyle = '#888';
+  const sec = t < SEC.B ? 'locus.map' : t < SEC.C ? 'locus.seq' : t < SEC.D ? 'locus.bit' : t < SEC.E ? 'locus.cat' : 'locus.ray';
+  x.fillText(`${sec}  ${t.toFixed(3).padStart(6, '0')}  ${String(Math.floor(t * 30)).padStart(4, '0')}`, U, H - U * 3);
+};
+
+const draw = t => {
+  x.fillStyle = '#000'; x.fillRect(0, 0, W, H);
+  if (t < SEC.B) drawGenome(t);
+  else if (t < SEC.C) drawSeq(t - SEC.B);
+  else if (t < SEC.D) drawBits(t - SEC.C);
+  else if (t < SEC.E) { const P = drawStars(t - SEC.D, false); drawLabels(t - SEC.D, P); }
+  else if (t < SEC.F) drawRays(t - SEC.E);
+  else { mono(U * 1.2); x.fillStyle = '#555'; x.textAlign = 'center'; x.fillText('locus', W / 2, H / 2); x.textAlign = 'left'; return; }
+  if (t < SEC.F && SEC.E + 0 > t) hud(t);
+  // 頭の白い1コマ（キックと同時）
+  if (t < 1 / 30 || Math.abs(t - SEC.D) < 1 / 60) { x.fillStyle = '#fff'; x.fillRect(0, 0, W, H); }
+};
+
+const t0 = performance.now();
+const frame = () => {
+  const t = ac ? Math.max(0, ac.currentTime - T0) : (performance.now() - t0) / 1000;
+  draw(t % LOOP);
+  requestAnimationFrame(frame);
+};
+setSize(); frame();
+document.getElementById('aspect').onchange = setSize;
+document.getElementById('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+
+document.getElementById('rec').onclick = e => {
+  if (ac) { ac.close(); ac = null; }   // 頭から録る
+  startAudio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `locus_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+// verytired.net のプレイヤーと render.py への窓口（README「作品側の決まり」）。ready は動画のほかに待つもの、media は再生と一緒に止める動画、output は音の出口
+window.piece = { output: () => out };
+</script>
+</body>
+</html>
