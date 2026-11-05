@@ -12,7 +12,7 @@
 - music/index.html            … music.tsv（曲名\tURL、上から並ぶ）から同じ template.html で作る
   YouTube の URL はサムネイル→押すと再生、それ以外（Bandcamp の EmbeddedPlayer の URL など）はそのまま iframe で埋める
 - lab/<名前>/index.html の YouTube ↗ … youtube.tsv（フォルダ名\tURL）に書いた作品だけ、操作バーに出す
-- tools/index.html            … tools.tsv（名前\t英文\t遊べる URL\tGitHub の URL\t動画 URL（任意））から作る。画像は tools/<名前>.jpg を手で置く
+- web/index.html            … web.tsv（名前\t英文\t遊べる URL\tGitHub の URL\t動画 URL（任意））から作る。画像は web/<名前>.jpg を手で置く
 """
 import datetime, html, re, shutil, subprocess, sys
 from pathlib import Path
@@ -84,7 +84,7 @@ def added(d):
 def intro():
     return ('<section class="intro"><p><b>veryTired</b> — Developer, not Engineer.</p>'
             '<p>Experiments in sound and image, made with code: <a href="audiovisual/">audiovisual</a>, '
-            '<a href="music/">music</a> and <a href="tools/">tools</a>.</p>'
+            '<a href="music/">music</a> and <a href="web/">web</a>.</p>'
             '<p><a href="https://x.com/very_tired">X</a> / <a href="https://www.instagram.com/verytired.developer/">Instagram</a> / '
             '<a href="https://www.youtube.com/@verytired.developer">YouTube</a> / <a href="https://github.com/verytired">GitHub</a></p>'
             '<a class="down" href="#latest">latest ↓</a></section>')
@@ -133,12 +133,12 @@ def tool(name, desc, play, repo, video=""):
             f'<em><a href="{html.escape(play)}">play</a> / <a href="{html.escape(repo)}">GitHub</a>{v}</em></span></div>')
 
 
-def tools():
-    rows = [l.split("\t") for l in (OUT / "tools.tsv").read_text().splitlines() if l.count("\t") in (3, 4)]
+def web():
+    rows = [l.split("\t") for l in (OUT / "web.tsv").read_text().splitlines() if l.count("\t") in (3, 4)]
     page = (OUT / "template.html").read_text()
     for k, v in {"ITEMS": "\n".join(tool(*r) for r in rows), "SUB": "made in the browser, open source", "ROOT": "../", "HERO": ""}.items():
         page = page.replace("{{%s}}" % k, v)
-    (OUT / "tools" / "index.html").write_text(page)
+    (OUT / "web" / "index.html").write_text(page)
 
 
 def main():
@@ -163,7 +163,7 @@ def main():
     (OUT / "audiovisual").mkdir(exist_ok=True)
     (OUT / "audiovisual" / "index.html").write_text(page)
     music()
-    tools()
+    web()
     print(f"{len(items)} items -> index.html")
 
 

@@ -18,7 +18,7 @@ uv run check_player.py [name…]    # check every piece in lab/ in a browser
 | `audiovisual/index.html` | List of all pieces |
 | `lab/<name>/` | Each piece: `piece.html` (copied as is), `index.html` (wrapped in `player.html`), media in `src/`, light `.sp.mp4` for phones, `loop.mp4` preview |
 | `music/index.html` | Built from `music.tsv` |
-| `tools/index.html` | Built from `tools.tsv` |
+| `web/index.html` | Built from `web.tsv` |
 
 Pages use `template.html`; the piece player is `player.html`.
 
@@ -29,7 +29,7 @@ Pages use `template.html`; the piece player is `player.html`.
 | `en.tsv` | `folder<TAB>English description` |
 | `youtube.tsv` | `folder<TAB>YouTube URL` — adds a YouTube link to that piece's player |
 | `music.tsv` | `title<TAB>URL` — YouTube URL, or the `src` of a Bandcamp embed |
-| `tools.tsv` | `name<TAB>description<TAB>play URL<TAB>GitHub URL<TAB>video URL (optional)`; image at `tools/<name>.jpg` |
+| `web.tsv` | `name<TAB>description<TAB>play URL<TAB>GitHub URL<TAB>video URL (optional)`; image at `web/<name>.jpg` |
 
 ## Scripts
 
