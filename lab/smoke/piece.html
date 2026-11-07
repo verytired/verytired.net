@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smoke</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; image-rendering: pixelated; }
+  button, select { font: inherit; padding: 6px; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="14"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<video src="src/smoke_src.mp4" muted loop playsinline preload="auto"></video>
+
+<script>
+// 黒地に立ちのぼる白い煙（Veo）を、1ビットの誤差拡散（Atkinson）に落とす。ループの頭の1拍だけ元の映像。
+// キックの拍のあいだは、動画を少し前の時刻から流し直す（煙が戻って同じ巻き上がりを繰り返す）。
+// 120 BPM のダブテクノの14秒ループ（28拍＝7小節）：裏拍の Dm9 の和音を付点8分のテープディレイへ。ディレイの返りで煙が明るくなる
+const BPM = 120, NB = 28, BEAT = 60 / BPM, BAR = 4 * BEAT, LOOP = NB * BEAT, ECHO = 0.75 * BEAT, FB = 0.5;
+const rng = s => () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+// ---- 譜面：音も映像もここから読む ----
+const EV = [], R0 = rng(7);
+const CHORD = [0, 1, 0, 0, 0, 1, 0, 1];   // 1小節を16分で割った位置ごとの和音（毎小節同じ型で刻み続ける）
+// 和音のフィルター：ループの中でゆっくり開いて閉じる（頭と終わりで閉じて、つなぎ目が揃う）
+const sweep = tl => Math.sin(Math.PI * tl / LOOP) ** 2;
+const BACK = [0, 0, 0.5, 0, 0, 0.9, 0.35, 0, 0, 0, 0.5, 0, 0.25, 0.9, 0, 0.6];   // 拍ごとの巻き戻し（秒）。0 は巻き戻さない
+for (let b = 0; b < NB; b++) {
+  const T = b * BEAT;
+  EV.push({ t: T, type: 'kick', v: BACK[b % 16] });
+  EV.push({ t: T + BEAT / 2, type: 'hat', v: 1 });
+  EV.push({ t: T + BEAT * 0.75, type: 'hat', v: 0.3 + R0() * 0.2 });
+  if (b % 2 === 1) EV.push({ t: T + BEAT * 0.02, type: 'rim' });
+  for (let i = 0; i < 4; i++) if (CHORD[(b % 2) * 4 + i]) EV.push({ t: T + i * BEAT / 4, type: 'chord', v: sweep(T + i * BEAT / 4) });
+  if (b % 8 === 0) EV.push({ t: T, type: 'bass', v: [0, -2, -4, -2][(b / 8) % 4] });
+}
+EV.sort((a, b) => a.t - b.t);
+const lastEv = (tl, type) => { let x = null; for (const e of EV) { if (e.t > tl) break; if (e.type === type) x = e; } return x; };
+
+// ---- 音 ----
+const vid = document.querySelector('video');
+let ac = null, t0 = 0, out, verbIn, dlyIn, noiseBuf, nextEv = 0, loopN = 0;
+function audio() {
+  if (ac) return;
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 3;
+  out = ac.createGain(); out.gain.value = 0.85; out.connect(comp); comp.connect(ac.destination);
+  window.audioDest = ac.createMediaStreamDestination ? ac.createMediaStreamDestination() : null;
+  if (audioDest) comp.connect(audioDest);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  // 残響：長く暗い尾
+  const L = ac.sampleRate * 4, ir = ac.createBuffer(2, L, ac.sampleRate);
+  for (let ch = 0; ch < 2; ch++) { const x = ir.getChannelData(ch); for (let i = 0; i < L; i++) x[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / L, 3.5); }
+  const verb = ac.createConvolver(); verb.buffer = ir; verbIn = ac.createGain(); verbIn.gain.value = 0.7;
+  const vlp = ac.createBiquadFilter(); vlp.type = 'lowpass'; vlp.frequency.value = 2500;
+  verbIn.connect(verb); verb.connect(vlp); vlp.connect(out);
+  // テープディレイ：付点8分、返りのたびにこもって、少し歪む
+  dlyIn = ac.createGain();
+  const dl = ac.createDelay(2); dl.delayTime.value = ECHO;
+  const fb = ac.createGain(); fb.gain.value = FB;
+  const dlp = ac.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 1800;
+  const dhp = ac.createBiquadFilter(); dhp.type = 'highpass'; dhp.frequency.value = 250;
+  const sat = ac.createWaveShaper(); sat.curve = new Float32Array(256).map((_, i) => Math.tanh(1.6 * (i / 128 - 1)) / 1.6);   // 小さい音では増幅しない（1.6 倍のままだと返りが FB×1.6≒1 でハウリングした）
+  const wob = ac.createOscillator(), wg = ac.createGain(); wob.frequency.value = 0.4; wg.gain.value = 0.0015; wob.connect(wg); wg.connect(dl.delayTime); wob.start();
+  dlyIn.connect(dl); dl.connect(dlp); dlp.connect(dhp); dhp.connect(sat); sat.connect(fb); fb.connect(dl);
+  sat.connect(out); sat.connect(verbIn);
+  // レコードのさー：ずっと鳴る薄いノイズ
+  const hiss = ac.createBufferSource(); hiss.buffer = noiseBuf; hiss.loop = true;
+  const hf = ac.createBiquadFilter(); hf.type = 'bandpass'; hf.frequency.value = 5000; hf.Q.value = 0.4;
+  const hg = ac.createGain(); hg.gain.value = 0.02; hiss.connect(hf); hf.connect(hg); hg.connect(out); hiss.start();
+  vid.play();
+  t0 = ac.currentTime + 0.05;
+  setInterval(schedule, 25); schedule();
+}
+function schedule() {   // 0.2秒先まで鳴らしておく。ループの頭で譜面を読み直す
+  for (;;) {
+    if (nextEv >= EV.length) { nextEv = 0; loopN++; }
+    const e = EV[nextEv], t = t0 + loopN * LOOP + e.t;
+    if (t > ac.currentTime + 0.2) break;
+    nextEv++;
+    if (t < ac.currentTime - 0.05) continue;
+    ({ kick, hat, rim, chord, bass })[e.type](t, e.v);
+  }
+}
+function noise(t, len) { const n = ac.createBufferSource(); n.buffer = noiseBuf; n.loop = true; n.start(t, Math.random()); n.stop(t + len); return n; }
+function env(g, t, v, d) { g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.001, t + d); }
+function kick(t) {   // こもった丸いキック：歪ませず、上を切る
+  const o = ac.createOscillator(), g = ac.createGain(), f = ac.createBiquadFilter();
+  f.type = 'lowpass'; f.frequency.value = 180;
+  o.frequency.setValueAtTime(95, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+  env(g, t, 1.1, 0.5); o.connect(f); f.connect(g); g.connect(out); o.start(t); o.stop(t + 0.55);
+}
+function hat(t, v) {   // こもったハット
+  const n = noise(t, 0.06), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.frequency.value = 7000; f.Q.value = 1.2;
+  env(g, t, 0.12 * v, 0.045); n.connect(f); f.connect(g); g.connect(out); g.connect(verbIn);
+}
+function rim(t) {   // 2・4拍のリム：短いクリックをほとんど残響へ
+  const o = ac.createOscillator(), g = ac.createGain(); o.type = 'triangle'; o.frequency.value = 1650;
+  env(g, t, 0.18, 0.025); o.connect(g); g.connect(out); g.connect(verbIn); g.connect(dlyIn); o.start(t); o.stop(t + 0.04);
+}
+function chord(t, v) {   // Dm7 の短い和音：同じ型で刻み、フィルターの開き（v＝sweep）だけがゆっくり変わる。ほとんどをディレイと残響へ
+  const f = ac.createBiquadFilter(), g = ac.createGain(), top = 250 + 2200 * v;
+  f.type = 'lowpass'; f.Q.value = 7;
+  f.frequency.setValueAtTime(top, t); f.frequency.exponentialRampToValueAtTime(top * 0.4, t + 0.25);
+  env(g, t, 0.06, 0.3);
+  for (const m of [50, 53, 57, 60]) for (const dt of [-6, 6]) {
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 440 * 2 ** ((m - 69) / 12); o.detune.value = dt;
+    o.connect(f); o.start(t); o.stop(t + 0.32);
+  }
+  f.connect(g); g.connect(out); g.connect(dlyIn); g.connect(verbIn);
+}
+function bass(t, v) {   // 2小節のサブベース：D から下がる
+  const o = ac.createOscillator(), g = ac.createGain(), f = 440 * 2 ** ((38 + v - 69) / 12);
+  o.frequency.value = f;
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.32, t + 0.05); g.gain.setValueAtTime(0.32, t + 7 * BEAT); g.gain.linearRampToValueAtTime(0, t + 8 * BEAT - 0.02);
+  o.connect(g); g.connect(out); o.start(t); o.stop(t + 8 * BEAT);
+}
+
+// ---- 映像 ----
+// 動画を作業用の小さな画面（幅の 1/5）に描いて灰色の配列にし、直近のコマを貯める。黒い地は加算（スクリーン）で透明と同じなので、
+// 煙のコピーを切り抜かずに重ねられる。小節ごとに重ね方と白黒にするやり方を替え、最後にマスの粗さへ縮めて 1 ビットにする
+const c = document.getElementById('c'), cx = c.getContext('2d');
+const wc = document.createElement('canvas'), wx = wc.getContext('2d', { willReadFrequently: true });   // 作業用（動画を描く）
+const sm = document.createElement('canvas'), sx = sm.getContext('2d');   // マスの粗さの絵（拡大して描く）
+const CELL = [5, 4, 6, 3, 5, 4, 7];   // マスの大きさ（1080 幅に対する px、小節ごと）
+const ZOOM = 1.4;   // 煙の柱を画面いっぱいに寄せる
+let W, H, WW, WH;
+function setSize() {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number); c.width = W; c.height = H;
+  WW = Math.round(W / 5); WH = Math.round(H / 5); wc.width = WW; wc.height = WH; ring.length = 0;
+}
+
+// 動画の時刻：キックの拍のあいだは、BACK 秒前から流し直す。ループの頭と終わりで素材の時刻が合うよう、素材は往復でつないである
+function vidTime(tl) {
+  const k = lastEv(tl, 'kick');
+  return Math.max(0, tl - (k ? k.v : 0));
+}
+// ディレイの返り：和音のあと付点8分ごとに FB 倍で弱まる山
+function echoLevel(tl) {
+  let s = 0;
+  for (const e of EV) {
+    if (e.t > tl) break;
+    if (e.type !== 'chord') continue;
+    const dt = tl - e.t, n = Math.floor(dt / ECHO);
+    if (n > 8) continue;
+    s += FB ** n * Math.exp(-(dt - n * ECHO) / 0.08);
+  }
+  return Math.min(1.5, s);
+}
+// 音の大きさのおおよそ（音の帯に使う）：キックと和音の山
+function level(t) {
+  let s = 0;
+  for (const e of EV) {
+    if (e.t > t) break;
+    const dt = t - e.t;
+    if (e.type === 'kick') s += Math.exp(-dt / 0.12);
+    else if (e.type === 'chord' && dt < 2) { const n = Math.floor(dt / ECHO); s += 0.5 * FB ** n * Math.exp(-(dt - n * ECHO) / 0.1); }
+  }
+  return Math.min(1, s * 0.7);
+}
+
+// 貯めたコマ：{ t（ループの時刻）, g（灰色 0..1） }。ずらしたコピーは「何秒前」で引く
+const ring = [], RING = 60;
+function past(tl, sec) {
+  for (let i = ring.length - 1; i >= 0; i--) { const d = (tl - ring[i].t + LOOP) % LOOP; if (d >= sec - 0.02) return ring[i].g; }
+  return ring.length ? ring[0].g : null;
+}
+function grab(tl) {
+  wx.globalCompositeOperation = 'source-over'; wx.fillStyle = '#000'; wx.fillRect(0, 0, WW, WH);
+  const vw = vid.videoWidth, vh = vid.videoHeight, s = Math.max(WW / vw, WH / vh) * ZOOM;
+  wx.drawImage(vid, (WW - vw * s) / 2, WH - vh * s * 0.92, vw * s, vh * s);
+  const p = wx.getImageData(0, 0, WW, WH).data, g = new Float32Array(WW * WH);
+  for (let i = 0; i < g.length; i++) g[i] = Math.pow(Math.min(1, p[i * 4] / 255 * 0.72), 1.25);
+  ring.push({ t: tl, g }); if (ring.length > RING) ring.shift();
+  return g;
+}
+// 読み出し（範囲外は黒）
+const at = (g, x, y) => (x < 0 || y < 0 || x >= WW || y >= WH) ? 0 : g[(y | 0) * WW + (x | 0)];
+const scr = (a, b) => 1 - (1 - a) * (1 - b);   // スクリーン合成：黒は透明
+const topFade = v => Math.min(1, Math.max(0, v / (WH * 0.18)));   // 元の画面の上端を、縮めたコピーで横一直線に見せない
+
+// 1. 映像のディレイ：付点8分前・2つ前…の煙を、少しずつ上へずらし FB 倍で暗くして重ねる（音のディレイと同じ間と減り方）
+function fxEcho(F, tl) {
+  for (let n = 1; n <= 4; n++) {
+    const g = past(tl, n * ECHO); if (!g) break;
+    const dy = n * WH * 0.06, a = FB ** n;
+    for (let y = 0; y < WH; y++) for (let x = 0; x < WW; x++) { const i = y * WW + x; F[i] = scr(F[i], a * at(g, x, y + dy)); }
+  }
+}
+// 2. 煙を増やす：拍ごとに 1→2→4→8 本。時間をずらし、横に並べ、1本おきに左右反転、外ほど小さく
+function fxMany(F, tl, n) {
+  F.fill(0);
+  for (let k = 0; k < n; k++) {
+    const g = past(tl, k * 0.13) || F, cxk = (k + 0.5) / n, sc = n === 1 ? 1 : 0.55 + 0.45 * (1 - Math.abs(cxk - 0.5) * 2), flip = k % 2;
+    for (let y = 0; y < WH; y++) for (let x = 0; x < WW; x++) {
+      let u = (x / WW - cxk) / sc + 0.5; if (flip) u = 1 - u;
+      const v = 1 - (1 - y / WH) / sc;   // 下の根元はそろえる
+      const i = y * WW + x; F[i] = Math.max(F[i], at(g, u * WW, v * WH) * topFade(v * WH));   // 本数が多いので明るいほうを取る（足すと白く飽和した）
+    }
+  }
+}
+// 3. ぶつける：左右反転を下から、上下反転を上から出して重ねる
+function fxCollide(F, tl) {
+  const g = past(tl, 0.4); if (!g) return;
+  for (let y = 0; y < WH; y++) for (let x = 0; x < WW; x++) { const i = y * WW + x; F[i] = scr(F[i], 0.6 * at(g, WW - 1 - x, WH - 1 - y) * topFade(WH - 1 - y)); }
+}
+// 4. 煙を窓に：煙の形の中だけ、別の時刻の煙を4倍に拡大して見せる（中は Bayer の網にする印を立てる）
+function fxWindow(F, M, tl) {
+  const g = past(tl, 0.9) || F, z = 4, ox = WW * 0.5, oy = WH * (0.55 + 0.1 * Math.sin(tl));
+  for (let y = 0; y < WH; y++) for (let x = 0; x < WW; x++) {
+    const i = y * WW + x, m = Math.min(1, Math.max(0, (F[i] - 0.12) * 6));
+    M[i] = m > 0.5 ? 1 : 0;
+    F[i] = m * at(g, ox + (x - ox) / z, oy + (y - oy) / z) * 1.3;
+  }
+}
+// 5. スプリングリバーブの揺れ：リムのたびに、横に波打つ揺れが下から上へ伝わって消える
+function fxSpring(F, tl) {
+  const r = lastEv(tl, 'rim'); if (!r) return;
+  const dt = tl - r.t, A = WW * 0.08 * Math.exp(-dt / 0.35); if (A < 0.3) return;
+  const src = F.slice();
+  for (let y = 0; y < WH; y++) {
+    const h = 1 - y / WH, front = dt * 2.2;   // 波の先は下から上へ進む
+    const dx = h > front ? 0 : A * Math.sin(2 * Math.PI * (h * 5 - dt * 7)) * Math.exp(-(front - h) * 1.5);
+    for (let x = 0; x < WW; x++) F[y * WW + x] = at(src, x - dx, y);
+  }
+}
+// 6. コピー機の世代劣化：n 回コピーを重ねる。毎回、少しずれて大きくなり、にじんで、黒白が強まり、トナーの粒が乗る
+function fxCopy(F, n, seed) {
+  const R = rng(seed);
+  for (let k = 0; k < n; k++) {
+    const src = F.slice(), sc = 1.012, ox = (R() - 0.5) * 2, oy = (R() - 0.5) * 2, cx0 = WW / 2, cy0 = WH / 2;
+    for (let y = 0; y < WH; y++) for (let x = 0; x < WW; x++) {
+      const u = (x - cx0) / sc + cx0 + ox, v = (y - cy0) / sc + cy0 + oy;
+      const b = (at(src, u - 1, v) + at(src, u + 1, v) + at(src, u, v - 1) + at(src, u, v + 1) + 2 * at(src, u, v)) / 6;
+      let s = 1 / (1 + Math.exp(-(b - 0.42) * 9));   // 黒白を強める
+      if (R() < 0.004) s = 1 - s * 0.3;   // トナーの粒
+      F[y * WW + x] = s;
+    }
+  }
+}
+
+// 縮めて 1 ビットにする。way：'atk'（Atkinson の誤差拡散）・'bayer'（4×4 の格子）・'rand'（ランダム）・'thr'（しきい値だけ）。M が 1 の所は Bayer
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => (v + 0.5) / 16);
+let buf = null, img = null;
+function oneBit(F, w, h, way, M, gain, inv) {
+  if (!buf || buf.length !== w * h) { buf = new Float32Array(w * h); img = sx.createImageData(w, h); }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const v = F[Math.min(WH - 1, (y * WH / h) | 0) * WW + Math.min(WW - 1, (x * WW / w) | 0)] * gain;
+    buf[y * w + x] = inv ? 1 - Math.min(1, v) : Math.min(1, v);
+  }
+  const R = rng(frameN);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, v = buf[i];
+    const m = way === 'bayer' || (M && M[Math.min(WH - 1, (y * WH / h) | 0) * WW + Math.min(WW - 1, (x * WW / w) | 0)]);
+    if (m) { buf[i] = v > BAYER[(y & 3) * 4 + (x & 3)] ? 1 : 0; continue; }
+    if (way === 'rand') { buf[i] = v > R() ? 1 : 0; continue; }
+    if (way === 'thr') { buf[i] = v > 0.5 ? 1 : 0; continue; }
+    const o = v > 0.5 ? 1 : 0, e = (v - o) / 8; buf[i] = o;   // Atkinson：誤差の 6/8 を右2・下3・2つ下へ
+    if (x + 1 < w) buf[i + 1] += e;
+    if (x + 2 < w) buf[i + 2] += e;
+    if (y + 1 < h) { if (x > 0) buf[i + w - 1] += e; buf[i + w] += e; if (x + 1 < w) buf[i + w + 1] += e; }
+    if (y + 2 < h) buf[i + 2 * w] += e;
+  }
+  const p = img.data;
+  for (let i = 0; i < w * h; i++) { const q = buf[i] > 0.5 ? ink : paper; p[i * 4] = q[0]; p[i * 4 + 1] = q[1]; p[i * 4 + 2] = q[2]; p[i * 4 + 3] = 255; }
+  sx.putImageData(img, 0, 0);
+}
+// 色：1 ビットの白と黒を、紙の色とインクの色に置き換える（リソグラフ風）。[紙, インク]、小節ごと。7 小節目は拍ごと
+const INK = { black: [12, 12, 14], white: [244, 242, 236], pink: [255, 72, 176], yellow: [255, 232, 0], blue: [0, 120, 191], orange: [255, 108, 47], green: [0, 169, 92], cream: [242, 234, 214], navy: [24, 36, 82] };
+const PAL = [['black', 'white'], ['black', 'pink'], ['yellow', 'blue'], ['orange', 'black'], ['cream', 'green'], ['white', 'pink'], null];
+const PAL7 = [['navy', 'yellow'], ['pink', 'black'], ['black', 'orange'], ['blue', 'white']];
+let paper = INK.black, ink = INK.white;
+const css = v => `rgb(${v})`;
+// 光学サウンドトラック：左端に映画フィルムの送り穴と、音の大きさで幅が変わる白い帯。フィルムは上へ流れる
+function soundtrack(tl, inv) {
+  const bw = W * 0.11, hole = W * 0.028, speed = H * 0.9, fg = css(ink), bg = css(paper);
+  cx.fillStyle = bg; cx.fillRect(0, 0, bw, H);
+  cx.fillStyle = fg;
+  const off = (tl * speed) % (hole * 2.4);
+  for (let y = -off; y < H; y += hole * 2.4) cx.fillRect(W * 0.012, H - y - hole * 1.2, hole, hole * 1.2);   // 送り穴
+  const step = 4, mid = W * 0.075, amp = W * 0.028;
+  for (let y = 0; y < H; y += step) {   // 帯：画面の上ほど前の音（上へ流れる）
+    const a = amp * (0.08 + level(Math.max(0, tl - (H - y) / speed)));
+    cx.fillRect(mid - a, y, a * 2, step);
+  }
+}
+
+// 版の組み方：小節ごとに紙と2〜3色のインク。版ごとに違う時刻（ディレイの半分ずつ前）の煙で刷る。
+// 明るい紙はインクを乗算で刷り重ね（重なると濃くなる）、黒い紙は光るインクを足す（重なると白くなる）
+// 白黒にした（インサイトで伸びた3本は全部黒地に白の高コントラスト。マーケターの判断）。紙は黒、インクは白と灰の濃淡で、加算で重ねる
+INK.g1 = [120, 120, 120]; INK.g2 = [64, 64, 64];
+const P1 = { dark: true, paper: 'black', inks: ['white'] }, P2 = { dark: true, paper: 'black', inks: ['white', 'g1'] }, P3 = { dark: true, paper: 'black', inks: ['white', 'g1', 'g2'] };
+const PLATES = [P1, P3, P2, P2, P2, P3, null];
+const PLATES7 = [P2, P3, P1, P3];
+INK.cyan = [0, 200, 255];
+// 1 版ぶんの濃さを作る（小節ごとの演出）。tl は版の時刻
+function compose(tl, g, bar, bt) {
+  const F = g.slice(); let way = 'atk', M = null;
+  if (bar === 0) fxEcho(F, tl);
+  else if (bar === 1) fxMany(F, tl, 1 << bt);
+  else if (bar === 2) { way = 'bayer'; fxSpring(F, tl); }
+  else if (bar === 3) fxCopy(F, 1 + bt * 2, bar * 100 + bt);
+  else if (bar === 4) { M = new Uint8Array(WW * WH); fxWindow(F, M, tl); }
+  else if (bar === 5) { fxCollide(F, tl); fxEcho(F, tl); fxSpring(F, tl); if (bt >= 2) fxCopy(F, bt - 1, 500 + bt); }
+  else way = ['atk', 'bayer', 'rand', 'thr'][bt];
+  return { F, M, way };
+}
+let frameN = 0;
+function frame() {
+  requestAnimationFrame(frame);
+  const tl = ac ? Math.max(0, ac.currentTime - t0) % LOOP : (performance.now() / 1000) % LOOP;
+  const vt = vidTime(tl);
+  if (Math.abs(vid.currentTime - vt) > 0.08) vid.currentTime = vt;
+  if (vid.readyState < 2) return;
+  frameN++;
+  const g = grab(tl), bar = Math.floor(tl / BAR), bt = Math.floor(tl / BEAT) % 4;
+  if (tl < BEAT) {   // ループの頭の1拍は元の映像
+    cx.imageSmoothingEnabled = true;
+    const vw = vid.videoWidth, vh = vid.videoHeight, s = Math.max(W / vw, H / vh) * ZOOM;
+    cx.fillStyle = '#000'; cx.fillRect(0, 0, W, H); cx.drawImage(vid, (W - vw * s) / 2, H - vh * s * 0.92, vw * s, vh * s); return;
+  }
+  const P = PLATES[bar] || PLATES7[bt];
+  const cell = CELL[bar] * W / 1080, w = Math.round(W / cell), h = Math.round(H / cell);
+  if (sm.width !== w || sm.height !== h) { sm.width = w; sm.height = h; buf = null; }
+  const gain = 1 + 0.15 * echoLevel(tl) + 0.15 * sweep(tl);
+  const k = lastEv(tl, 'kick'), kHit = k ? Math.exp(-(tl - k.t) / 0.1) : 0;
+  cx.globalCompositeOperation = 'source-over'; cx.fillStyle = css(INK[P.paper]); cx.fillRect(0, 0, W, H);
+  cx.imageSmoothingEnabled = false;
+  P.inks.forEach((name, i) => {   // 版ごとに：その時刻の煙を作り、インクの色で 1 ビットにして刷り重ねる
+    const d = i * ECHO / 2, gi = i ? past(tl, d) || g : g, L = compose(tl - d, gi, bar, bt);
+    paper = P.dark ? [0, 0, 0] : [255, 255, 255]; ink = INK[name];   // 版の地は足しても掛けても変わらない色（真っ黒・真っ白）
+    oneBit(L.F, w, h, L.way, L.M, gain, false);
+    const R = rng(i * 7 + 1), ang = R() * 6.283, m = W * (0.004 + 0.02 * kHit) * i;   // 見当ずれ：キックで跳ねて戻る
+    cx.globalCompositeOperation = P.dark ? 'lighter' : 'multiply';
+    cx.drawImage(sm, Math.cos(ang) * m, Math.sin(ang) * m, W, H);
+  });
+  cx.globalCompositeOperation = 'source-over';
+  paper = INK[P.paper]; ink = INK[P.inks[0]];
+  if (bar === 4) soundtrack(tl, false);
+}
+
+document.getElementById('aspect').onchange = setSize; setSize();
+requestAnimationFrame(frame);
+document.getElementById('play').onclick = audio;
+c.onpointerdown = audio;
+
+document.getElementById('rec').onclick = e => {
+  audio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `smoke_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+// verytired.net のプレイヤーと render.py への窓口（README「作品側の決まり」）
+window.piece = { media: () => [vid], output: () => out };
+</script>
+</body>
+</html>
