@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Howl</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="31"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<video id="va" src="src/boxer_v1.mp4" muted loop playsinline preload="auto"></video>
+<video id="vb" src="src/scream_v1.mp4" muted loop playsinline preload="auto"></video>
+
+<script>
+// 白黒の叫ぶ顔2本（Veo）を、ゲンロックしていない2台のカメラとして拍ごとに切り替える。絵はアナログの映像信号として計算する：
+// カラライザーで5色にした絵を NTSC のコンポジット信号にし、伝送路（帯域・共振・ゴースト・ノイズ・ドロップアウト）を通し、
+// 受像機（同期分離・水平と垂直の PLL・バーストで色を復調）で走査線に戻し、ブラウン管（ビームの太さ・残光・アパーチャーグリル・高圧の垂れ）に映す。
+// 切り替えのたびに同期の位置が飛ぶので、受像機が追いつくまで画面が裂けて流れる。音が動かすのは原因（同期の強さ・ノイズ・ドロップアウト・高圧）だけ。
+// 参考：staticdogma「War Face.」（#glitchart）
+const c = document.getElementById('c');
+const VA = document.getElementById('va'), VB = document.getElementById('vb');
+const BEAT = 60 / 124, BAR = 4 * BEAT, LOOP = 16 * BAR;   // 約 31 秒
+
+// ---- 譜面：音も映像もここから読む ----
+// Liaisons Dangereuses（「Los Niños del Parque」）のような、MS-20 を SQ-10 で鳴らす1本の線が主役の曲。
+// SQ-10 は3段のつまみ：1段目が音程、2段目がフィルター、3段目が音の長さ。それを 16 分で順に読む。弾き手は全体のフィルターだけを小節ごとに開けていく。
+// ドラムは乾いた四つ打ちのキック、2・4 拍のノイズのスネア、16 分のハイハット、ときどき金属とタムのフィル。声は鳴らさない。
+// 0小節目はフィルターを閉じたベースだけ（元の白黒）。
+// 拍ごと（8 小節目から半拍ごと）にカメラを切り替える。15 小節目の後半は信号が途切れて電源が落ちる
+const EV = [];
+const SEQ = [0, 12, 0, 7, 0, 12, 10, 0, 0, 12, 0, 7, 3, 5, 10, 12];       // 1段目：E からの半音
+const CUT = [1, .3, .6, .4, .8, .3, .7, .35, .9, .3, .6, .4, .7, .5, .65, .85];   // 2段目：フィルター
+const GATE = [.7, .4, .5, .4, .6, .4, .8, .3, .7, .4, .5, .4, .5, .5, .6, .9];    // 3段目：音の長さ（16 分に対する割合）
+const ROOT = [0, 0, 0, 0, 5, 5, 3, 3];   // 2 小節ごとの根音の動き
+for (let bar = 0; bar < 16; bar++) {
+  const T = bar * BAR, end = bar === 15, n16 = end ? 8 : 16;
+  for (let s = 0; s < n16; s++) {
+    if (bar % 4 === 3 && !end && s >= 12) continue;   // 横流れの拍はベースを抜く（ブレイク）
+    const n = SEQ[s] + (bar === 0 ? 0 : ROOT[(bar >> 1) % 8]);
+    EV.push({ t: T + s * BEAT / 4, type: 'bass', n, open: (bar === 0 ? 0.08 : 0.35 + 0.5 * ((bar % 4) / 3)) * CUT[s], gate: GATE[s] });
+    if (bar >= 2 && !(end && s >= 8)) EV.push({ t: T + s * BEAT / 4, type: 'hat', v: s % 4 === 2 ? 1 : s % 2 ? 0.45 : 0.3 });
+  }
+  if (bar === 0) continue;
+  for (let b = 0; b < (end ? 2 : 4); b++) {
+    EV.push({ t: T + b * BEAT, type: 'kick' });
+    if (b % 2 === 1) EV.push({ t: T + b * BEAT, type: 'snare' });
+    if (bar >= 2) EV.push({ t: T + b * BEAT + BEAT / 2, type: 'metal', v: b === 3 ? 1 : 0.6 });
+  }
+  if (bar >= 4 && !end) EV.push({ t: T + 3.75 * BEAT, type: 'metal', v: 0.8 });
+  // 4 小節ごとの2小節目の終わりにタムのフィル（16 分で下がる）。映像は動かさない
+  if (bar % 4 === 1 && bar >= 5) [0, 1, 2, 3].forEach(s => EV.push({ t: T + 3 * BEAT + s * BEAT / 4, type: 'tom', f: [220, 180, 150, 120][s] }));
+  const step = bar >= 8 ? BEAT / 2 : BEAT;
+  for (let x = 0; x < (end ? BAR / 2 : BAR) - 1e-6; x += step) EV.push({ t: T + x, type: 'cut' });
+  // 横流れ：4小節ごとの最後の拍と、15 小節目の後半
+  if (bar % 4 === 3 && !end) EV.push({ t: T + 3 * BEAT, type: 'smear', len: BEAT });
+  if (end) EV.push({ t: T + BAR / 2, type: 'smear', len: BAR / 2 });
+}
+EV.sort((a, b) => a.t - b.t);
+// 切り替えの何回目か → どちらのカメラか
+const cutsBefore = tl => { let n = 0; for (const e of EV) { if (e.t > tl) break; if (e.type === 'cut') n++; } return n; };
+const OFFS = [1.6, 4.2];   // カメラ（動画）の再生の頭。男の吠え始め（約3秒）をドロップに合わせる。女は叫んでいる所から
+
+// ---- 音 ----
+let ac = null, t0 = 0, out, bus, dist, bdist, pulse, noiseBuf, nextEv = 0, loopN = 0;
+const F0 = 41.2;   // E1
+function audio() {
+  if (ac) return;
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -12; comp.ratio.value = 3; comp.attack.value = 0.004; comp.release.value = 0.15;
+  out = ac.createGain(); out.gain.value = 0.45;
+  out.connect(comp); comp.connect(ac.destination);
+  window.audioDest = ac.createMediaStreamDestination ? ac.createMediaStreamDestination() : null;
+  if (audioDest) comp.connect(audioDest);
+  bus = ac.createGain(); bus.connect(out);
+  dist = ac.createWaveShaper(); const cv = new Float32Array(1024);   // 横流れの音を通す歪み（キックとベースは通さない）
+  for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; cv[i] = Math.tanh(x * 2.2) * 0.8; }
+  dist.curve = cv; dist.oversample = '2x';
+  const dg = ac.createGain(); dg.gain.value = 0.5; dist.connect(dg); dg.connect(out);
+  // ベース専用の歪み（オーバードライブ）。ベースはこれを通してからフィルターへ
+  // ベースの音源：幅 35% のパルス波（MS-20 の PW を少し絞った音）
+  const N = 64, re = new Float32Array(N), im = new Float32Array(N);
+  for (let k = 1; k < N; k++) im[k] = 2 * Math.sin(Math.PI * k * 0.35) / (Math.PI * k);
+  pulse = ac.createPeriodicWave(re, im);
+  // ベースアンプ：真空管のゆるい飽和 → スピーカーの箱（高域を落とす）。全部の音がここを通る1台
+  const amp = ac.createWaveShaper(), ac2 = new Float32Array(1024);
+  for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; ac2[i] = Math.tanh(x * 1.6 + 0.1) - Math.tanh(0.1); }
+  amp.curve = ac2; amp.oversample = '4x';
+  const cab = ac.createBiquadFilter(); cab.type = 'lowpass'; cab.frequency.value = 3200; cab.Q.value = 0.9;
+  const cabH = ac.createBiquadFilter(); cabH.type = 'highpass'; cabH.frequency.value = 45;
+  bdist = ac.createGain(); bdist.connect(amp); amp.connect(cab); cab.connect(cabH); cabH.connect(bus);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  t0 = ac.currentTime + 0.05;
+  VA.currentTime = OFFS[0]; VB.currentTime = OFFS[1]; VA.play(); VB.play();
+  setInterval(schedule, 25); schedule();
+}
+function noise(t, len) { const n = ac.createBufferSource(); n.buffer = noiseBuf; n.loop = true; n.start(t, Math.random()); n.stop(t + len); return n; }
+function env(g, t, peak, a, d) { g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(peak, t + a); g.gain.exponentialRampToValueAtTime(0.0001, t + a + d); }
+function kick(t) {   // 硬く短いキック（歪ませない）。頭に短いクリック
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(190, t); o.frequency.exponentialRampToValueAtTime(50, t + 0.04); o.frequency.exponentialRampToValueAtTime(40, t + 0.3);
+  env(g, t, 0.8, 0.001, 0.28); o.connect(g); g.connect(bus); o.start(t); o.stop(t + 0.35);
+  const c = noise(t, 0.01), cg = ac.createGain(); cg.gain.value = 0.4; c.connect(cg); cg.connect(bus);
+}
+function snare(t) {   // シンセのスネア：白色ノイズをバンドパスに通して短く切り、低い胴の音を足す（歪ませない）
+  const n = noise(t, 0.2), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.frequency.value = 2200; f.Q.value = 0.8; env(g, t, 0.7, 0.001, 0.16);
+  n.connect(f); f.connect(g); g.connect(bus);
+  const o = ac.createOscillator(), og = ac.createGain(); o.type = 'triangle';
+  o.frequency.setValueAtTime(220, t); o.frequency.exponentialRampToValueAtTime(170, t + 0.05);
+  env(og, t, 0.3, 0.001, 0.07); o.connect(og); og.connect(bus); o.start(t); o.stop(t + 0.1);
+  // 手拍子を重ねる：帯域を絞ったノイズを 3 回すばやく叩き、最後だけ少し伸ばす
+  const cn = noise(t, 0.3), cf = ac.createBiquadFilter(), cg = ac.createGain();
+  cf.type = 'bandpass'; cf.frequency.value = 1100; cf.Q.value = 1.5;
+  cg.gain.setValueAtTime(0.0001, t);
+  for (const d of [0, 0.01, 0.021]) { cg.gain.setValueAtTime(0.9, t + d); cg.gain.exponentialRampToValueAtTime(0.1, t + d + 0.009); }
+  cg.gain.setValueAtTime(0.9, t + 0.032); cg.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+  cn.connect(cf); cf.connect(cg); cg.connect(bus);
+}
+function hat(t, v) {   // ハイハット：高い帯域のノイズをごく短く
+  const n = noise(t, 0.05), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'highpass'; f.frequency.value = 7000; env(g, t, 0.16 * v, 0.001, 0.035);
+  n.connect(f); f.connect(g); g.connect(bus);
+}
+function tom(t, fr) {   // タム：下がるサイン波
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(fr * 1.6, t); o.frequency.exponentialRampToValueAtTime(fr, t + 0.04);
+  env(g, t, 0.45, 0.001, 0.22); o.connect(g); g.connect(bus); o.start(t); o.stop(t + 0.26);
+}
+function bass(t, n, open, gate) {   // SQ-10 で鳴らす MS-20：パルス波を共振の強いローパスに通す。フィルターと長さは段ごとのつまみ
+  const fr = F0 * 2 * Math.pow(2, n / 12), o = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain();
+  o.setPeriodicWave(pulse); o.frequency.value = fr; o.connect(f);
+  f.type = 'lowpass'; f.Q.value = 10;
+  const top = 150 + 4000 * open, len = BEAT / 4 * gate;
+  f.frequency.setValueAtTime(top, t); f.frequency.exponentialRampToValueAtTime(Math.max(100, top * 0.25), t + len);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5, t + 0.002);
+  g.gain.setValueAtTime(0.5, t + len); g.gain.exponentialRampToValueAtTime(0.0001, t + len + 0.015);
+  f.connect(g); g.connect(bdist); o.start(t); o.stop(t + len + 0.02);
+}
+function metal(t, v) {   // 金属を叩く音：音程の合わない比で FM をかけ、すぐ消える
+  const c = ac.createOscillator(), m = ac.createOscillator(), mg = ac.createGain(), g = ac.createGain(), f = ac.createBiquadFilter();
+  c.frequency.value = 420; m.frequency.value = 420 * 2.76; mg.gain.setValueAtTime(900, t); mg.gain.exponentialRampToValueAtTime(30, t + 0.25);
+  m.connect(mg); mg.connect(c.frequency); f.type = 'highpass'; f.frequency.value = 500;
+  env(g, t, 0.14 * v, 0.001, 0.28); c.connect(f); f.connect(g); g.connect(bus);
+  c.start(t); m.start(t); c.stop(t + 0.32); m.stop(t + 0.32);
+}
+function smearSnd(t, len) {   // 同期が外れる音：テープが伸びるように下がっていくノイズ
+  const n = noise(t, len), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.Q.value = 6; f.frequency.setValueAtTime(3000, t); f.frequency.exponentialRampToValueAtTime(120, t + len);
+  g.gain.setValueAtTime(0.25, t); g.gain.linearRampToValueAtTime(0.0001, t + len); n.connect(f); f.connect(g); g.connect(dist);
+}
+function schedule() {
+  const ahead = ac.currentTime + 0.2;
+  for (;;) {
+    const e = EV[nextEv], t = t0 + loopN * LOOP + e.t;
+    if (t > ahead) break;
+    if (t >= ac.currentTime - 0.01) {
+      if (e.type === 'kick') kick(t);
+      else if (e.type === 'snare') snare(t);
+      else if (e.type === 'tom') tom(t, e.f);
+      else if (e.type === 'bass') bass(t, e.n, e.open, e.gate);
+      else if (e.type === 'hat') hat(t, e.v);
+      else if (e.type === 'metal') metal(t, e.v);
+      else if (e.type === 'smear') smearSnd(t, e.len);
+    }
+    if (++nextEv === EV.length) { nextEv = 0; loopN++; }
+  }
+}
+
+// ---- 映像：アナログの映像信号をまるごと計算する ----
+// 送り側（カメラ2台）→ コンポジット信号 → 伝送路 → 受像機（同期分離・PLL・色の復調）→ ブラウン管。
+// 崩れは見た目を作らず、信号の中で起きることだけで出す。音が動かすのは原因（同期の強さ・ノイズ・ドロップアウト・高圧）だけ
+
+// 1 本の走査線は 402 サンプル（副搬送波の4倍で取る。402/4 = 100.5 周期なので、行ごとに色の位相が半周ずれる＝NTSC と同じ）
+const ACT = 320, SPL = 402, HS = 30, BS = 36, BL = 36, AS = 76, VBL = 20;   // 絵の幅、行の長さ、同期パルス、バーストの位置と長さ、絵の始まり、垂直帰線の行数
+const W_ = Math.PI / 2;   // 副搬送波の角速度（1 サンプルで 1/4 周）
+// 2台のカメラはゲンロックしていない：同期の位置（横は何サンプル、縦は何行）がずれている
+const CAM = [{ h: 0, v: 0 }, { h: 151, v: 197 }];
+let L, LT, FIELD, RING, ring, wHead, vstart, hpos, buf, Y0, I0, Q0;
+const lp = { x1: 0, x2: 0, y1: 0, y2: 0 };   // 伝送路のフィルターの状態（行をまたいで続く）
+
+const src = document.createElement('canvas'), sctx = src.getContext('2d', { willReadFrequently: true });
+function alloc() {
+  L = Math.round(ACT * H / W); LT = L + VBL; FIELD = LT * SPL; RING = FIELD * 6;
+  ring = new Float32Array(RING); wHead = 0; vstart = 0; hpos = -SPL;
+  buf = new Float32Array(ACT * L * 3); Y0 = new Float32Array(ACT * L); I0 = new Float32Array(ACT * L); Q0 = new Float32Array(ACT * L);
+  src.width = ACT; src.height = L;
+  if (gl) { gl.bindTexture(gl.TEXTURE_2D, tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, ACT, L, 0, gl.RGBA, gl.UNSIGNED_BYTE, null); px8 = new Uint8Array(ACT * L * 4); }
+}
+
+// カラライザー：明るさを帯に分けて色を付ける（ビデオシンセの色付けと同じ）。素材は背景が黒いので、いちばん暗い帯をピンクとオレンジにする。
+// 帯の境目は市松のディザ（細かい市松は副搬送波と干渉して偽色になる）
+const PAL = [[6, 10, 8], [24, 170, 100], [110, 190, 240], [255, 140, 40], [245, 140, 230]];
+const BAYER = [0.25, 0.75, 0.75, 0.25];
+// フレームバッファ（カメラと送り側の間にあるデジタルの部分。明るさ 6 ビット、320×L のメモリー）と、回路を曲げた所（ベンド）。
+// xo/yo：列・行のアドレス線が立ちっぱなし（OR）、xx：列のアドレス線が隣と短絡（XOR）→ 同じ区画が繰り返し・入れ替わって読まれる。
+// da/db：データ線の短絡（db のビットが立つと da のビットも立つ）→ 明るさの段がでたらめに跳び、色付けの帯が飛ぶ。
+// freeze：書き込みを止める行の割合（止まった行は前のコマのまま残る）。fb：受像機の出力を入力に戻す量（フィードバック）
+let FB = null;
+const BEND = { xo: 0, yo: 0, xx: 0, da: -1, db: -1, freeze: 0, seed: 0, fb: 0, osc: 0, cosc: 0 };   // cosc：色の発振器（水晶のトリマー）に触れて周波数がずれる量
+const hash = (a, b) => { const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return x - Math.floor(x); };
+function camera(v, raw, t) {   // カメラの絵をフレームバッファに書き、ベンドを通して読み出して色を付け、YIQ にする
+  const vw = v.videoWidth || 720, vh = v.videoHeight || 1280, s = Math.max(ACT / vw, L / vh);
+  sctx.filter = 'grayscale(1) contrast(1.25)';
+  sctx.drawImage(v, (ACT - vw * s) / 2, (L - vh * s) / 2, vw * s, vh * s);
+  sctx.filter = 'none';
+  const d = sctx.getImageData(0, 0, ACT, L).data;
+  if (!FB || FB.length !== ACT * L) FB = new Uint8Array(ACT * L);
+  for (let y = 0; y < L; y++) {
+    if (BEND.freeze && hash(y >> 3, BEND.seed) < BEND.freeze) continue;   // 8 行ずつのまとまりで書き込みが止まる
+    for (let x = 0; x < ACT; x++) {
+      const p = y * ACT + x; let l = d[p * 4];
+      if (BEND.fb) { const o = (Math.min(L - 1, y + 2) * ACT + Math.min(ACT - 1, x + 3)) * 3; l = l * (1 - BEND.fb) + Math.min(255, (buf[o] * 0.3 + buf[o + 1] * 0.6 + buf[o + 2] * 0.1) * 150) * BEND.fb; }
+      FB[p] = l >> 2;
+    }
+  }
+  for (let y = 0; y < L; y++) for (let x = 0; x < ACT; x++) {
+    const p = y * ACT + x, xr = ((x | BEND.xo) ^ BEND.xx) & 511, yr = (y | BEND.yo) & 1023;
+    let v6 = xr < ACT && yr < L ? FB[yr * ACT + xr] : 63;   // メモリーの外を読むと、バスが浮いて全部 1
+    if (BEND.da >= 0 && (v6 >> BEND.db) & 1) v6 |= 1 << BEND.da;
+    const l = v6 / 63;
+    let r = l, g = l, b = l;
+    if (!raw) {
+      const th = BAYER[(y & 1) * 2 + (x & 1)]; let k;
+      if (l < 0.07) k = 0.5 + 0.5 * Math.sin(x * 0.009 - y * 0.005 + t * 0.6) > th ? 4 : 3;
+      else { const q = Math.min(1.999, (l - 0.07) / 0.93 * 2.6), i = q | 0; k = q - i > th ? i + 1 : i; }
+      [r, g, b] = PAL[k].map(c => c / 255);
+    }
+    Y0[p] = 0.299 * r + 0.587 * g + 0.114 * b; I0[p] = 0.596 * r - 0.274 * g - 0.322 * b; Q0[p] = 0.211 * r - 0.523 * g + 0.312 * b;
+  }
+}
+
+// 送り側：1 フィールドぶんのコンポジット信号を、そのカメラ自身の時計で作り、伝送路を通してリングに書く。
+// 黒（ブランキング）= 0、同期 = -0.3、白 = 0.7。sync は同期パルスの強さ（弱いと受像機が同期を見失う）
+const gauss = () => Math.random() + Math.random() + Math.random() - 1.5;
+function transmit(cam, ch) {
+  const w0 = 2 * Math.PI * ch.fc, al = Math.sin(w0) / (2 * ch.Q), cw = Math.cos(w0), a0 = 1 + al;   // 双二次のローパス（RBJ）
+  const b0 = (1 - cw) / 2 / a0, b1 = (1 - cw) / a0, a1 = -2 * cw / a0, a2 = (1 - al) / a0;
+  const drops = [];   // ドロップアウト：テープの磁性体が欠けた所は、信号が白に張りついたノイズになる
+  for (let i = 0; i < ch.drops; i++) drops.push([Math.random() * FIELD | 0, 20 + Math.random() * 400 | 0]);
+  for (let i = 0; i < FIELD; i++) {
+    const loc = wHead + i + cam.h, ln = Math.floor(loc / SPL), n = loc - ln * SPL, fl = ((ln + cam.v) % LT + LT) % LT, th = W_ * loc;
+    let s = 0;
+    if (fl < 3) s = n < SPL - 30 ? -0.3 * ch.sync : 0;   // 垂直同期：幅の広いパルス
+    else if (n < HS) s = -0.3 * ch.sync;
+    else if (n >= BS && n < BS + BL) s = -0.12 * Math.cos(th) * ch.burst;   // カラーバースト（位相の基準）
+    else if (fl >= VBL && n >= AS && n < AS + ACT) {
+      const p = (fl - VBL) * ACT + (n - AS);
+      s = 0.7 * (Y0[p] + 0.6 * (I0[p] * Math.cos(th) + Q0[p] * Math.sin(th))) * ch.gain;
+      if (s > 0.85) s = 0.85 + (s - 0.85) * 0.2;   // 白の強すぎる所は送信機で潰れる
+    }
+    s += ch.noise * gauss();
+    for (const [a, len] of drops) if (i >= a && i < a + len) s = 0.75 + 0.2 * gauss();
+    s += ch.ghost * ring[(wHead + i - 23 + RING) % RING];   // ゴースト：23 サンプル遅れて届く反射
+    // 伝送路の帯域：共振のある2次のローパス（輪郭がにじみ、その先でリンギングする）
+    const y = b0 * s + b1 * lp.x1 + b0 * lp.x2 - a1 * lp.y1 - a2 * lp.y2;
+    lp.x2 = lp.x1; lp.x1 = s; lp.y2 = lp.y1; lp.y1 = y;
+    ring[(wHead + i) % RING] = y;
+  }
+  wHead += FIELD;
+}
+
+// 受像機
+const at = k => { const i = Math.floor(k), a = k - i, r0 = ring[((i % RING) + RING) % RING], r1 = ring[(((i + 1) % RING) + RING) % RING]; return r0 + (r1 - r0) * a; };
+const HFREE = SPL * 1.0015, VFREE = 1.012;   // 発振器の素の周期（少しずれている。同期が来ないとこの周期で流れる）
+let hcount = 0;
+function hstep() {   // 水平 PLL：次の同期パルスの立ち下がりを、予想の位置の前後半行の中で探し、ずれの 15% だけ追いつく
+  // 発振器の RC に体で触ると周期が揺れる：ハム（ほぼ1フィールドで1周）と、速い揺れ
+  hcount++;
+  const exp = hpos + HFREE * (1 + BEND.osc * (Math.sin(hcount * 2 * Math.PI / (LT * 0.93)) + 0.4 * Math.sin(hcount * 0.21))); let best = null;
+  for (let k = Math.floor(exp - SPL / 2); k < exp + SPL / 2; k++) {
+    if (at(k - 1) > -0.15 && at(k) <= -0.15 && (best === null || Math.abs(k - exp) < Math.abs(best - exp))) best = k;
+  }
+  hpos = best === null ? exp : exp + 0.15 * (best - exp);
+}
+function vsync() {   // 垂直：予想の位置の前後 0.45 フィールドで、幅の広い同期（256 サンプル以上続く）を探し、ずれの 40% だけ追いつく
+  const exp = vstart + FIELD * VFREE; let best = null, run = 0;
+  for (let k = Math.floor(exp - FIELD * 0.45); k < exp + FIELD * 0.45; k += 32) {
+    run = at(k) < -0.15 ? run + 1 : 0;
+    if (run === 8) { const s = k - 7 * 32; if (best === null || Math.abs(s - exp) < Math.abs(best - exp)) best = s; }
+  }
+  vstart = best === null ? exp : exp + 0.4 * (best - exp);
+  vstart = Math.min(Math.max(vstart, wHead - FIELD * 4.5), wHead - FIELD * 2.5);   // リングの中に収める
+}
+const Ib = new Float32Array(ACT), Qb = new Float32Array(ACT), Yb = new Float32Array(ACT);
+// 色の発振器：受像機の中で自分で回り、毎行バーストの位相に引き寄せられる（APC）。周波数がずれると、
+// 引き寄せきれない分だけ色相がずれ（色合いの狂い）、引き込める幅を超えると位相が滑って色相が横に流れる（虹色の帯）
+const CFREE = 0.0001, APC = 0.25;   // 素のずれ（rad / サンプル）、引き寄せの強さ
+let cph = 0;
+const wrap = a => a - 2 * Math.PI * Math.round(a / (2 * Math.PI));
+function receive(decay) {
+  vsync();
+  while (hpos < vstart - SPL) hstep();
+  for (let i = 0; i < buf.length; i++) buf[i] *= decay;   // 蛍光体の残光
+  for (let r = 0; r < LT; r++) {
+    hstep();
+    // バーストの位相を測り、色の発振器を引き寄せる。弱ければカラーキラー（白黒）
+    let bc = 0, bs = 0;
+    for (let k = BS + 4; k < BS + BL - 4; k++) { const s = at(hpos + k), a = W_ * Math.round(hpos + k); bc += s * Math.cos(a); bs += s * Math.sin(a); }
+    const amp = Math.hypot(bc, bs) / ((BL - 8) / 2), sat = amp > 0.05 ? Math.min(1.4, 0.12 / amp) : 0;   // ACC：バーストの強さで色の濃さを揃える
+    const df = CFREE + BEND.cosc;
+    cph = wrap(cph + df * SPL);
+    if (amp > 0.05) cph += APC * Math.min(1, amp / 0.12) * Math.sin(wrap(Math.atan2(bs, -bc) - cph));
+    if (r < VBL) continue;
+    for (let x = 0; x < ACT; x++) {
+      const k = hpos + AS + x, s = at(k);
+      const y = (at(k - 1.5) + at(k - 0.5) + at(k + 0.5) + at(k + 1.5)) / 4;   // 4 サンプルの平均：副搬送波が消えて明るさだけ残る
+      const c = s - y, a = W_ * Math.round(k) + cph + df * (AS + x);   // 行の中でも発振器はずれていく
+      Yb[x] = y / 0.7; Ib[x] = 2 * c * Math.cos(a); Qb[x] = 2 * c * Math.sin(a);
+    }
+    const row = (r - VBL) * ACT * 3; let si = 0, sq = 0;
+    for (let x = 0; x < ACT; x++) {   // 色は帯域が狭い：8 サンプルの移動平均（色が横ににじむ）
+      si += Ib[x] - (x >= 8 ? Ib[x - 8] : 0); sq += Qb[x] - (x >= 8 ? Qb[x - 8] : 0);
+      const y = Yb[x], i = si / 8 / 0.42 * sat, q = sq / 8 / 0.42 * sat, o = row + x * 3;
+      buf[o] += Math.max(0, y + 0.956 * i + 0.621 * q); buf[o + 1] += Math.max(0, y - 0.272 * i - 0.647 * q); buf[o + 2] += Math.max(0, y - 1.106 * i + 1.703 * q);
+    }
+  }
+}
+
+// ブラウン管（WebGL）：走査線ごとの光（明るいほど太い）、にじむ光、アパーチャーグリル、樽型のゆがみ、高圧の垂れで膨らむ画面、電源を切ったときの収束
+const gl = c.getContext('webgl2', { preserveDrawingBuffer: true });
+const VS = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p, 0, 1); }`;
+const FS = `#version 300 es
+precision highp float;
+uniform sampler2D tex; uniform vec2 res; uniform float L, breathe, off;
+out vec4 o;
+void main(){
+  vec2 uv = gl_FragCoord.xy / res; uv.y = 1. - uv.y;
+  vec2 c = uv * 2. - 1.;
+  c *= 1. + 0.06 * dot(c, c);                    // 樽型
+  c /= breathe;                                   // 高圧が垂れると画面が膨らむ
+  float sy = max(0.003, 1. - off * 1.7), sx = off < 0.6 ? 1. : max(0.003, 1. - (off - 0.6) * 2.5);
+  c.y /= sy; c.x /= sx;                           // 電源を切ると、縦に潰れて横線、そして点に
+  vec2 q = c * .5 + .5;
+  if (q.x < 0. || q.x > 1. || q.y < 0. || q.y > 1. || off >= 1.) { o = vec4(0, 0, 0, 1); return; }
+  float ly = q.y * L - .5, l0 = floor(ly); vec3 col = vec3(0);
+  for (int i = -1; i <= 2; i++) {
+    float li = l0 + float(i); vec3 s = texture(tex, vec2(q.x, (li + .5) / L)).rgb;
+    float sig = .26 + .22 * dot(s, vec3(.3, .6, .1)), d = ly - li;   // 明るい走査線ほど電子ビームが太る
+    col += s * exp(-d * d / (2. * sig * sig)) * (.4 / sig);
+  }
+  col += .35 * textureLod(tex, q, 3.).rgb + .2 * textureLod(tex, q, 5.).rgb;   // にじむ光
+  float m = mod(gl_FragCoord.x, 3.);
+  col *= vec3(m < 1. ? 1. : .45, m >= 1. && m < 2. ? 1. : .45, m >= 2. ? 1. : .45) * 1.5;   // アパーチャーグリル
+  col *= 1. - .3 * dot(c, c);
+  col *= min(3., 1. / sqrt(sy * sx));
+  o = vec4(pow(col, vec3(1. / 1.1)), 1);
+}`;
+function sh(type, s) { const x = gl.createShader(type); gl.shaderSource(x, s); gl.compileShader(x); if (!gl.getShaderParameter(x, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(x)); return x; }
+const prog = gl.createProgram(); gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(prog); gl.useProgram(prog);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer()); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const pl = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(pl); gl.vertexAttribPointer(pl, 2, gl.FLOAT, false, 0, 0);
+const U = n => gl.getUniformLocation(prog, n);
+const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+let px8, W, H, hv = 0;
+function setSize() {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  c.width = W; c.height = H; gl.viewport(0, 0, W, H); alloc();
+  for (let i = 0; i < 3; i++) { camera(VA, true, 0); transmit(CAM[0], CH0()); }   // 受像機が読む前に3フィールドためておく
+}
+const CH0 = () => ({ sync: 1, burst: 1, gain: 1, noise: 0.008, drops: 0, ghost: 0.08, fc: 0.3, Q: 1.3 });
+
+const lastEv = (tl, type) => { let x = null; for (const e of EV) { if (e.t > tl) break; if (e.type === type) x = e; } return x; };
+function frame() {
+  const now = ac ? ac.currentTime - t0 : 0, t = ((now % LOOP) + LOOP) % LOOP;
+  const raw = t < BAR, cam = raw ? 0 : cutsBefore(t) % 2;
+  const ch = CH0();
+  const sn = lastEv(t, 'snare'), kk = lastEv(t, 'kick'), sm = lastEv(t, 'smear');
+  if (sn && t - sn.t < BEAT / 4) { const k = 1 - (t - sn.t) / (BEAT / 4); ch.noise += 0.12 * k; ch.drops = 6 * k | 0; ch.Q = 1.3 + 2.5 * k; }   // スネア：ノイズとドロップアウト、共振が強まる
+  if (kk && t - kk.t < 0.05) hv = 1;   // キック：高圧が一瞬垂れる
+  // 接点に触れる：スネアでアドレス線とデータ線、金属の音で列のアドレス線の XOR、キックで発振器
+  Object.assign(BEND, { xo: 0, yo: 0, xx: 0, da: -1, db: -1, freeze: 0, fb: 0 });
+  BEND.osc *= 0.82; BEND.cosc *= 0.85;
+  if (!raw) {
+    const gh = lastEv(t, 'metal');
+    if (sn && t - sn.t < BEAT / 2) { const r = hash(sn.t, 1), r2 = hash(sn.t, 2); BEND.xo = 1 << (3 + (r * 4 | 0)); if (r2 < 0.5) BEND.yo = 1 << (4 + (r2 * 8 | 0)); BEND.da = 4 + (r * 2 | 0); BEND.db = r2 * 4 | 0; }
+    if (gh && t - gh.t < BEAT / 4) BEND.xx = 1 << (2 + (hash(gh.t, 3) * 4 | 0));
+    if (kk && t - kk.t < 0.05) BEND.osc = Math.max(BEND.osc, 0.012);
+    if (sm && t < sm.t + sm.len) { BEND.freeze = 0.6; BEND.seed = sm.t; BEND.fb = 0.45; BEND.osc = 0.03; BEND.cosc = Math.max(BEND.cosc, 0.0015); }
+    // タムのフィル：色の発振器のトリマーに触れる。打つたびに周波数が大きくずれ、色相が滑って流れる
+    const tm = lastEv(t, 'tom');
+    if (tm && t - tm.t < BEAT / 4) BEND.cosc = Math.max(BEND.cosc, 0.0012 * (1 + (220 - tm.f) / 40));
+  }
+  let off = 0;
+  if (sm && t < sm.t + sm.len) {   // 横流れ：同期の信号が弱まり、帯域も狭まる
+    const k = Math.min(1, (t - sm.t) / (BEAT / 4));
+    ch.sync = 1 - 0.95 * k; ch.fc = 0.3 - 0.18 * k;
+    if (sm.len > BEAT) { const e = (t - sm.t) / sm.len; ch.burst = 1 - e; ch.gain = 1 - 0.5 * e; off = Math.max(0, (e - 0.55) / 0.45); }   // 最後：信号が途切れていき、電源が落ちる
+  }
+  camera(cam ? VB : VA, raw, t);
+  transmit(CAM[cam], ch);
+  receive(0.4);
+  // 画面全体の明るさで高圧が垂れる（明るいほど画面が膨らむ）
+  let sum = 0; for (let i = 0; i < buf.length; i += 31) sum += buf[i]; const mean = sum / (buf.length / 31);
+  hv *= 0.8;
+  for (let i = 0, j = 0; i < buf.length; i += 3, j += 4) {
+    px8[j] = 255 * (1 - Math.exp(-1.3 * buf[i])); px8[j + 1] = 255 * (1 - Math.exp(-1.3 * buf[i + 1])); px8[j + 2] = 255 * (1 - Math.exp(-1.3 * buf[i + 2])); px8[j + 3] = 255;
+  }
+  gl.bindTexture(gl.TEXTURE_2D, tex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, ACT, L, gl.RGBA, gl.UNSIGNED_BYTE, px8); gl.generateMipmap(gl.TEXTURE_2D);
+  gl.uniform2f(U('res'), W, H); gl.uniform1f(U('L'), L); gl.uniform1f(U('breathe'), 1 + 0.02 * mean + 0.03 * hv); gl.uniform1f(U('off'), off);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+
+const ready = Promise.all([VA, VB].map(v => v.readyState >= 2 ? 0 : new Promise(r => v.addEventListener('loadeddata', r, { once: true }))));
+ready.then(() => requestAnimationFrame(frame));
+
+document.getElementById('aspect').onchange = setSize; setSize();
+document.getElementById('play').onclick = audio;
+c.onpointerdown = audio;
+document.getElementById('rec').onclick = e => {
+  audio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `howl_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+window.piece = { ready: () => ready, media: () => [VA, VB], output: () => out };
+</script>
+</body>
+</html>
