@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>まばたき — verytired.net</title>
+<link rel="icon" href="/favicon.svg">
+<meta name="description" content="まばたきがシャッターになる。カメラに映った自分のまばたきで、目のスナップショットが積もっていく。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@600;800&family=Zen+Kaku+Gothic+New:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #121214; --line: #2c2c2a; --fg: #f0efec; --fg2: #c3c2b7; --dim: #8a8a84; --accent: #3dff6a;
+    --serif: "Shippori Mincho B1", serif; --sans: "Zen Kaku Gothic New", system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    --gut: 16px;
+  }
+  @media (min-width: 760px) { :root { --gut: 48px; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.8 var(--sans); -webkit-font-smoothing: antialiased; }
+  a { color: inherit; }
+  button { font: inherit; color: inherit; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 var(--gut); }
+
+  .site { display: flex; justify-content: space-between; gap: 16px; padding: 12px var(--gut); font: 13px/1.5 var(--mono); }
+  .site a { text-decoration: none; color: var(--dim); }
+  .site a:hover { color: var(--fg); }
+  .site h1 { margin: 0; font: inherit; } .site h1 a { color: var(--accent); }
+
+  .hero { display: grid; gap: 40px; padding-top: 56px; padding-bottom: 56px; align-items: center; }
+  @media (min-width: 900px) { .hero { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; padding-top: 88px; } }
+  .kicker { font: 12px/1 var(--mono); letter-spacing: .14em; color: var(--dim); text-transform: uppercase; margin: 0 0 24px; }
+  .hero h2 { font: 800 clamp(56px, 8vw, 104px)/1 var(--serif); margin: 0; white-space: nowrap; letter-spacing: -.02em; }
+  .hero h2 span { color: var(--dim); font-weight: 600; }
+  .lead { font-size: clamp(16px, 2vw, 19px); color: var(--fg2); max-width: 30em; margin: 28px 0 0; }
+  .start { margin-top: 36px; display: inline-flex; align-items: center; gap: 10px; padding: 14px 26px; background: var(--fg); color: var(--bg); border: 0; border-radius: 999px; font-weight: 700; font-size: 16px; cursor: pointer; }
+  .start:hover { background: var(--accent); }
+  .start:disabled { opacity: .5; cursor: default; background: var(--fg); }
+  #status { margin: 14px 0 0; font: 13px/1.6 var(--mono); color: var(--dim); min-height: 1.6em; }
+  .notes { margin: 28px 0 0; padding: 20px 0 0; border-top: 1px solid var(--line); list-style: none; display: grid; gap: 6px; font-size: 13px; color: var(--dim); }
+  .notes li::before { content: "— "; }
+  .demo { position: relative; aspect-ratio: 1; background: #000; border: 1px solid var(--line); }
+  .demo video { width: 100%; height: 100%; display: block; object-fit: cover; }
+  .demo figcaption { position: absolute; left: 12px; bottom: 10px; font: 11px/1.4 var(--mono); color: var(--dim); background: rgb(0 0 0 / .6); padding: 2px 6px; }
+  footer { padding: 40px var(--gut) 40px; color: var(--dim); font: 12px/1.6 var(--mono); border-top: 1px solid var(--line); }
+  footer a { color: var(--accent); text-decoration: none; }
+
+  /* 動いている間：画面いっぱい */
+  #stage { position: fixed; inset: 0; background: #000; z-index: 10; }
+  #stage[hidden] { display: none; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .ctl { position: absolute; right: 16px; bottom: 16px; display: flex; gap: 8px; }
+  .ctl button { font: 13px/1 var(--mono); padding: 10px 14px; background: rgb(0 0 0 / .65); color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; cursor: pointer; }
+  .ctl button:disabled { opacity: .5; cursor: default; }
+  #hint { position: absolute; left: 50%; bottom: 72px; transform: translateX(-50%); width: calc(100% - 32px); text-align: center; font: 13px/1.6 var(--mono); color: var(--accent); text-shadow: 0 0 6px #000; pointer-events: none; }
+</style>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-Q0N8ZQ3WLB"></script>
+<script>window.dataLayer = window.dataLayer || []; function gtag(){dataLayer.push(arguments);} gtag('js', new Date()); gtag('config', 'G-Q0N8ZQ3WLB');</script>
+<script>document.addEventListener('click', e => { const el = e.target.closest('a,button'); if (!el) return; gtag('event', 'ui_click', { label: el.id || el.getAttribute('aria-label') || el.textContent.trim().slice(0, 40), link_url: el.href || undefined }); }, true);</script>
+</head>
+<body>
+<header class="site">
+  <h1><a href="https://verytired.net/">verytired.net</a></h1>
+  <nav><a href="https://verytired.net/web/">← verytired.net の web へ</a></nav>
+</header>
+<main class="wrap hero" id="intro">
+  <div>
+    <p class="kicker">カメラ／まばたき</p>
+    <h2>まばたき<span>。</span></h2>
+    <p class="lead">まばたきがシャッターになります。目を開けていられる間は音が張りつめ、まばたきした瞬間に、あなたの目が1枚撮られて画面に積もっていきます。16枚たまると番号順に並んで、また最初から。</p>
+    <button class="start" id="cam">◉ カメラで始める</button>
+    <p id="status" aria-live="polite">顔の検出を読み込み中…</p>
+    <ul class="notes">
+      <li>カメラの映像はこの端末のブラウザの中だけで使います。どこにも送らず、保存もしません</li>
+      <li>音が出ます</li>
+      <li>明るい場所で、顔を正面に向けてください</li>
+    </ul>
+  </div>
+  <figure class="demo" style="margin:0">
+    <video src="preview.mp4" autoplay muted loop playsinline></video>
+    <figcaption>動いているところ（ひとりaudio/visual「blink」より）</figcaption>
+  </figure>
+</main>
+<footer>verytired.net — <a href="https://x.com/very_tired">@very_tired</a></footer>
+<div id="stage" hidden>
+  <canvas id="c"></canvas>
+  <div id="hint"></div>
+  <div class="ctl">
+    <button id="rec">● 30秒録画</button>
+    <button id="stop">終わる</button>
+  </div>
+</div>
+<script>
+// カメラに映った顔のまばたきを MediaPipe で検出し、目が開き直した瞬間に目のまわりを撮って、番号付きの窓として画面に積む。
+// 音はまばたきが原因：我慢している長さで持続音が張りつめ、撮るたびにシャッターと音程のある短い音。16枚たまったら番号順の格子に並べて、また始める。
+// 映像はブラウザの中だけで使い、どこにも送らない
+const END = 3, LIVE_MAX = 16;
+const status = document.getElementById('status');
+
+// ---- まばたきの検出
+const EYES = [[33, 133, 159, 145, 158, 153], [362, 263, 386, 374, 385, 380]];   // 本人の右目・左目の目尻・目頭・上下のまぶた
+const TV = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+let lm = null, ts = 0;
+const newState = () => ({ closed: false, last: -9, box: null, EYE: null });
+const blinkOf = r => { const bs = r.faceBlendshapes[0].categories, sc = n => bs.find(c => c.categoryName === n).score; return (sc('eyeBlinkLeft') + sc('eyeBlinkRight')) / 2; };
+// 顔の点（0〜1）から目の窓と顔の四角を出し、閉じた（0.45 を超えた）あと開き直した（0.25 を下回った）コマなら shot
+// lum(idx) はその目のまわりの明るさ。最初に顔が取れたコマで明るく映っているほうの目を選び、以後は変えない
+function analyze(f, b, vw, vh, st, t, lum) {
+  if (!st.EYE) st.EYE = lum(EYES[0]) >= lum(EYES[1]) ? EYES[0] : EYES[1];
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0; for (const i of st.EYE) { x0 = Math.min(x0, f[i].x); y0 = Math.min(y0, f[i].y); x1 = Math.max(x1, f[i].x); y1 = Math.max(y1, f[i].y); }
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, w = (x1 - x0) * 1.9, h = w * 0.5 * vw / vh;   // 目を真ん中にした横長の窓（画素で 2:1）
+  const nb = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2];
+  st.box = st.box ? st.box.map((x, i) => x + (nb[i] - x) * 0.5) : nb;
+  let fx0 = 1, fy0 = 1, fx1 = 0, fy1 = 0; for (const q of f) { fx0 = Math.min(fx0, q.x); fy0 = Math.min(fy0, q.y); fx1 = Math.max(fx1, q.x); fy1 = Math.max(fy1, q.y); }
+  let shot = false;
+  if (!st.closed && b > 0.45) st.closed = true;
+  else if (st.closed && b < 0.25) { st.closed = false; if (t - st.last > 0.12) { shot = true; st.last = t; } }
+  return { b, box: st.box.slice(), face: [fx0, fy0, fx1, fy1], shot };
+}
+const lumOf = (g, f, vw, vh) => idx => {
+  const xs = idx.map(i => f[i].x * vw), ys = idx.map(i => f[i].y * vh), x = Math.min(...xs), y = Math.min(...ys);
+  const d = g.getImageData(x, y, Math.max(1, Math.max(...xs) - x), Math.max(1, Math.max(...ys) - y)).data;
+  let m = 0; for (let i = 0; i < d.length; i += 4) m += d[i]; return m / (d.length / 4);
+};
+import(TV).then(async ({ FaceLandmarker, FilesetResolver }) => {
+  const fs = await FilesetResolver.forVisionTasks(TV + '/wasm');
+  lm = await FaceLandmarker.createFromOptions(fs, {
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate: 'GPU' },
+    runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: true, minFaceDetectionConfidence: 0.2, minFacePresenceConfidence: 0.2, minTrackingConfidence: 0.2 });
+  if (!live) status.textContent = '';
+}).catch(e => status.textContent = '顔の検出を読み込めませんでした：' + e.message);
+
+// ---- 音
+let ac = null, liveDrone = null, out, wet, audioDest, noiseBuf;
+const SCALE = [0, 3, 5, 7, 10];
+const audio = () => {
+  if (ac) { ac.resume(); return; }
+  ac = new AudioContext();
+  out = ac.createGain(); out.gain.value = 0.7;
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -12; comp.ratio.value = 4;
+  out.connect(comp); comp.connect(ac.destination);
+  audioDest = ac.createMediaStreamDestination(); comp.connect(audioDest);
+  // 短い音にだけかけるディレイ
+  wet = ac.createGain(); wet.gain.value = 0.35;
+  const dl = ac.createDelay(1), fb = ac.createGain(), lp = ac.createBiquadFilter();
+  dl.delayTime.value = 0.19; fb.gain.value = 0.38; lp.type = 'lowpass'; lp.frequency.value = 2600;
+  wet.connect(dl); dl.connect(lp); lp.connect(fb); fb.connect(dl); lp.connect(out);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  liveDrone = makeLiveDrone();
+};
+const noise = (at, d) => { const b = ac.createBufferSource(); b.buffer = noiseBuf; b.loop = true; b.start(at, Math.random() * 1.5); b.stop(at + d + 0.02); return b; };
+const click = (at, f, len, v) => {   // 帯域を絞った短いノイズ
+  const n = noise(at, len + 0.01), bp = ac.createBiquadFilter(), g = ac.createGain();
+  bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = 3;
+  g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(v, at + 0.0008); g.gain.exponentialRampToValueAtTime(0.0001, at + len);
+  n.connect(bp); bp.connect(g); g.connect(out);
+};
+const shutter = at => { click(at, 5200, 0.008, 0.4); click(at + 0.05, 1700, 0.02, 0.3); };
+const blip = (at, n, g = 0.13, d = 0.35) => {   // 撮った番号で音程が上がっていく短い音
+  const f = 220 * Math.pow(2, (SCALE[n % 5] + 12 * (Math.floor(n / 5) % 3)) / 12);
+  for (const [m, v] of [[1, 1], [2.01, 0.25]]) {
+    const o = ac.createOscillator(), e = ac.createGain(); o.frequency.value = f * m;
+    e.gain.setValueAtTime(0, at); e.gain.linearRampToValueAtTime(g * v, at + 0.004); e.gain.exponentialRampToValueAtTime(0.0001, at + d);
+    o.connect(e); e.connect(out); e.connect(wet); o.start(at); o.stop(at + d + 0.02);
+  }
+};
+const makeLiveDrone = () => {   // 我慢している間に張りつめる持続音：低いのこぎり波の開くフィルターと、耳鳴りの高い音。今の我慢の長さで毎コマ動かす
+  const lo = ac.createGain(), lp = ac.createBiquadFilter(), ring = ac.createGain(), F = [55, 55.4, 82.4];
+  lp.type = 'lowpass'; lp.Q.value = 6; lp.connect(lo); lo.connect(out); ring.connect(out); lo.gain.value = 0; ring.gain.value = 0;
+  const oscs = F.map(f => { const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.connect(lp); o.start(); return o; });
+  const ro = ac.createOscillator(); ro.frequency.value = 3520; ro.connect(ring); ro.start();
+  return { update(d, on = true) {
+    const t = ac.currentTime;
+    lo.gain.setTargetAtTime(on ? Math.min(0.32, 0.05 + d * 0.05) : 0, t, 0.03);
+    lp.frequency.setTargetAtTime(Math.min(5000, 180 * Math.pow(2, d * 0.9)), t, 0.03);
+    ring.gain.setTargetAtTime(on ? Math.min(0.05, d * 0.008) : 0, t, 0.03);
+    oscs.forEach((o, i) => o.frequency.setTargetAtTime(F[i] * Math.pow(2, Math.min(d, 6) / 12), t, 0.03));
+  } };
+};
+const chord = at => {   // 格子がそろったところで鳴らす低い和音
+  for (const s of [0, 7, 10, 15]) {
+    const o = ac.createOscillator(), e = ac.createGain(), f = ac.createBiquadFilter(); o.type = 'sawtooth'; o.frequency.value = 55 * Math.pow(2, s / 12);
+    f.type = 'lowpass'; f.frequency.setValueAtTime(2400, at); f.frequency.exponentialRampToValueAtTime(200, at + 2.2);
+    e.gain.setValueAtTime(0, at); e.gain.linearRampToValueAtTime(0.09, at + 0.01); e.gain.exponentialRampToValueAtTime(0.0001, at + 2.3);
+    o.connect(f); f.connect(e); e.connect(out); e.connect(wet); o.start(at); o.stop(at + 2.4);
+  }
+  shutter(at);
+};
+
+// ---- 絵
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+let W, H, S;
+function setSize() { if (!innerWidth || !innerHeight) return; const k = 1080 / Math.min(innerWidth, innerHeight); W = Math.round(innerWidth * k); H = Math.round(innerHeight * k); c.width = W; c.height = H; S = Math.min(W, H); }
+const hash = n => { let s = (n * 2654435761) >>> 0; s ^= s >>> 15; s = Math.imul(s, 2246822519) >>> 0; s ^= s >>> 13; return (s >>> 0) / 4294967296; };
+const grain = document.createElement('canvas'); grain.width = grain.height = 256;
+{ const g = grain.getContext('2d'), im = g.createImageData(256, 256); for (let i = 0; i < im.data.length; i += 4) { const v = Math.random() * 255; im.data[i] = im.data[i + 1] = im.data[i + 2] = v; im.data[i + 3] = 255; } g.putImageData(im, 0, 0); }
+const GREEN = '#3dff6a';
+const wins = [];   // 撮った窓：{ img, x, y, w, h, rot, n, t }
+const ease = x => x < 0 ? 0 : x > 1 ? 1 : 1 - Math.pow(1 - x, 3);
+
+const snap = (src, vw, vh, box, n, t) => {   // 窓を撮る：目のまわりを切り出し、画面のばらけた位置に置く
+  const [bx0, by0, bx1, by1] = box, iw = 360, ih = Math.round(iw * (by1 - by0) * vh / ((bx1 - bx0) * vw));
+  const img = document.createElement('canvas'); img.width = iw; img.height = ih;
+  const g = img.getContext('2d'); g.filter = 'grayscale(1) contrast(1.35)';
+  g.drawImage(src, bx0 * vw, by0 * vh, (bx1 - bx0) * vw, (by1 - by0) * vh, 0, 0, iw, ih);
+  const w = S * (0.16 + 0.08 * hash(n * 3 + 1)), h = w * ih / iw;
+  const cx = W * (0.1 + 0.8 * hash(n * 7919 + 17)), cy = H * (0.15 + 0.7 * hash(n * 104729 + 31));
+  wins.push({ img, x: cx - w / 2, y: cy - h / 2, w, h, rot: (hash(n * 13) - 0.5) * 0.12, n, t });
+};
+// 毎コマ鏡に映すように左右を返して検出し、その場で撮って鳴らす。16枚たまったら格子に並べて、また始める
+let live = null;
+function liveScene() {
+  const L = live, v = L.v;
+  if (v.readyState < 2) return null;
+  const vw = v.videoWidth, vh = v.videoHeight, fr = L.fr, now = performance.now() / 1000;
+  if (fr.width !== vw) { fr.width = vw; fr.height = vh; }
+  L.g.setTransform(-1, 0, 0, 1, vw, 0); L.g.drawImage(v, 0, 0); L.g.setTransform(1, 0, 0, 1, 0, 0);
+  if (L.endAt >= 0) {
+    const e = now - L.endAt;
+    if (e < END) { liveDrone.update(0, false); return { src: fr, vw, vh, T: null, hold: 0, now, endT: e }; }
+    wins.length = 0; L.endAt = -1; L.lastShot = now; L.n = 0;
+  }
+  const r = lm.detectForVideo(fr, ts += 33), f = r.faceLandmarks && r.faceLandmarks[0];
+  L.T = null;
+  if (f) {
+    const a = analyze(f, blinkOf(r), vw, vh, L.st, now, lumOf(L.g, f, vw, vh));
+    L.T = a;
+    if (a.shot) {
+      snap(fr, vw, vh, a.box, L.n, now); L.lastShot = now;
+      const at = ac.currentTime; shutter(at); blip(at, L.n);
+      L.n++;
+      if (wins.length >= LIVE_MAX) {
+        L.endAt = now;
+        wins.forEach((_, i) => click(at + 0.6 * i / wins.length, 3000 + (i % 7) * 300, 0.006, 0.18)); chord(at + 0.65);
+      }
+    }
+  }
+  const hold = now - L.lastShot;
+  liveDrone.update(hold, !!f);
+  return { src: fr, vw, vh, T: L.T, hold, now, endT: -1 };
+}
+const hint = document.getElementById('hint'), stage = document.getElementById('stage'), intro = document.getElementById('intro');
+async function startCam() {
+  const btn = document.getElementById('cam');
+  btn.disabled = true; status.textContent = 'カメラを開いています…';
+  audio();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    const v = document.createElement('video'); v.srcObject = stream; v.muted = true; v.playsInline = true; await v.play();
+    const fr = document.createElement('canvas');
+    status.textContent = '顔の検出を読み込み中…';
+    while (!lm) await new Promise(r => setTimeout(r, 100));
+    wins.length = 0;
+    live = { v, stream, fr, g: fr.getContext('2d', { willReadFrequently: true }), st: newState(), T: null, lastShot: performance.now() / 1000, n: 0, endAt: -1 };
+    stage.hidden = false; setSize(); status.textContent = '';
+  } catch (e) {
+    status.textContent = e.name === 'NotAllowedError' ? 'カメラが許可されませんでした。ブラウザの設定で許可してから、もう一度押してください'
+      : e.name === 'NotFoundError' ? 'カメラが見つかりませんでした' : 'カメラを開けませんでした：' + e.message;
+  }
+  btn.disabled = false;
+}
+function stopCam() {
+  if (!live) return;
+  live.stream.getTracks().forEach(t => t.stop());
+  live = null; wins.length = 0; liveDrone.update(0, false);
+  stage.hidden = true;
+}
+
+function frame() {
+  requestAnimationFrame(frame);
+  const sc = live && lm ? liveScene() : null;
+  if (sc) draw(sc);
+  if (live) { const t = sc && !sc.T && sc.endT < 0 ? '顔を画面の真ん中に入れてください' : live.n === 0 && sc && sc.endT < 0 ? 'まばたきすると撮ります' : ''; if (hint.textContent !== t) hint.textContent = t; }
+}
+function draw({ src, vw, vh, T, hold, now, endT }) {
+  const ending = endT >= 0;
+  // 我慢が長いほど目へ寄る仮想カメラ
+  let sc = Math.max(W / vw, H / vh), ox = (W - vw * sc) / 2, oy = (H - vh * sc) / 2;
+  if (T && !ending) {
+    const z = 1 + Math.min(0.5, hold * 0.06), ex = (T.box[0] + T.box[2]) / 2 * vw, ey = (T.box[1] + T.box[3]) / 2 * vh;
+    const fx = (T.face[0] + T.face[2]) / 2 * vw, fy = (T.face[1] + T.face[3]) / 2 * vh, m = Math.min(1, hold * 0.12);
+    const px = fx + (ex - fx) * m, py = fy + (ey - fy) * m;
+    sc *= z; ox = W / 2 - px * sc; oy = H / 2 - py * sc;
+    ox = Math.min(0, Math.max(W - vw * sc, ox)); oy = Math.min(0, Math.max(H - vh * sc, oy));
+  }
+  const lastShot = wins.length ? wins[wins.length - 1].t : -9, pulse = Math.exp(-(now - lastShot) * 10);
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  const endP = ending ? ease(endT / 0.6) : 0;
+  ctx.filter = 'grayscale(1) contrast(1.35)';
+  ctx.globalAlpha = 1 - endP * 0.85;
+  ctx.drawImage(src, ox, oy, vw * sc, vh * sc);
+  ctx.filter = 'none'; ctx.globalAlpha = 1;
+  // 粒子
+  ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = 0.22;
+  const gx = -hash(Math.floor(now * 30)) * 256, gy = -hash(Math.floor(now * 30) + 99) * 256, gs = S / 540;
+  ctx.save(); ctx.scale(gs, gs); for (let y = gy; y < H / gs; y += 256) for (let x = gx; x < W / gs; x += 256) ctx.drawImage(grain, x, y); ctx.restore();
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+
+  ctx.lineWidth = Math.max(1, S / 500);
+  ctx.font = `${Math.round(S / 60)}px ui-monospace, monospace`;
+  // 目を追う緑の枠と閉じ具合
+  if (T && !ending) {
+    const x = ox + T.box[0] * vw * sc, y = oy + T.box[1] * vh * sc, w = (T.box[2] - T.box[0]) * vw * sc, h = (T.box[3] - T.box[1]) * vh * sc;
+    ctx.strokeStyle = GREEN; ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = GREEN; ctx.fillRect(x, y - S / 42, S / 7.5, S / 42);
+    ctx.fillStyle = '#000'; ctx.fillText(`EYE ${T.b.toFixed(2)}`, x + S / 160, y - S / 160);
+  }
+  // 撮った窓：最後に撮ってすぐは少しふくらむ。終わりは番号順の格子へ
+  const n = wins.length;
+  let cols = 1; while (cols < n && Math.ceil(n / cols) * (W / cols) * 0.5 > H * 0.9) cols++;
+  const cw = W / cols, ch = cw * 0.5, gy0 = (H - Math.ceil(n / Math.max(1, cols)) * ch) / 2;
+  wins.forEach((o, i) => {
+    let { x, y, w, h, rot } = o;
+    const z = i === n - 1 ? 1 + pulse * 0.25 : 1 + pulse * 0.04;
+    if (ending) {
+      const p = ease((endT - 0.6 * i / Math.max(1, n)) / 0.5);
+      const tx = (i % cols) * cw + cw * 0.04, ty = gy0 + Math.floor(i / cols) * ch + ch * 0.04, tw = cw * 0.92, th = Math.min(ch * 0.92, tw * o.h / o.w);
+      x += (tx - x) * p; y += (ty - y) * p; w += (tw - w) * p; h += (th - h) * p; rot *= 1 - p;
+    }
+    ctx.save(); ctx.translate(x + w / 2, y + h / 2); ctx.rotate(rot); ctx.scale(z, z);
+    if (now - o.t < 2 / 30 && !ending) { ctx.fillStyle = '#fff'; ctx.fillRect(-w / 2, -h / 2, w, h); }   // 撮った2コマだけ白く光る
+    else ctx.drawImage(o.img, -w / 2, -h / 2, w, h);
+    ctx.strokeStyle = GREEN; ctx.strokeRect(-w / 2, -h / 2, w, h);
+    ctx.fillStyle = GREEN; ctx.fillText(String(o.n).padStart(2, '0'), w / 2 - S / 28, -h / 2 + S / 50);
+    ctx.restore();
+  });
+  // 画面の表示：我慢している秒数と撮った数
+  ctx.fillStyle = GREEN; ctx.font = `${Math.round(S / 38)}px ui-monospace, monospace`;
+  if (!ending) {
+    ctx.fillText(`NO BLINK ${hold.toFixed(2).padStart(5, '0')}s`, S * 0.05, S * 0.08);
+    ctx.fillText(`SHOTS ${String(n).padStart(2, '0')}`, S * 0.05, S * 0.08 + S / 30);
+  } else ctx.fillText(`${String(n).padStart(2, '0')} BLINKS`, S * 0.05, S * 0.08);
+}
+
+addEventListener('resize', setSize); setSize();
+document.getElementById('cam').onclick = startCam;
+document.getElementById('stop').onclick = stopCam;
+addEventListener('keydown', e => { if (e.key === 'Escape') stopCam(); });
+document.getElementById('rec').onclick = e => {
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `blink_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 30秒録画';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.state === 'recording' && rec.stop(), 30000);
+  document.getElementById('stop').addEventListener('click', () => rec.state === 'recording' && rec.stop(), { once: true });
+};
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
