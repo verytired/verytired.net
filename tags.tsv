@@ -1,9 +1,9 @@
-001_strobe		photo
-002_scanner		point cloud, 3d
-003_kaleido		ai
+001_strobe	noise	photo
+002_scanner	breakcore	point cloud, 3d
+003_kaleido	techno	ai
 004_ascii	glitch	ascii, photo
-005_ascii_scan		ascii, point cloud
-006_meltdown		code, dot
+005_ascii_scan	house	ascii, point cloud
+006_meltdown	chiptune	code, dot
 007_modlines	hip-hop	dot, photo
 008_slowdive	ambient	ai, vhs, dot
 009_squelch	acid, hardcore	particles
@@ -25,7 +25,7 @@
 025_footage	ambient	ai, vhs
 026_locus	glitch	data
 027_keyer	industrial	ai, crt, vhs
-028_bender		crt, vhs
+028_bender	industrial	crt, vhs
 029_relic	techno, glitch	particles, photo
 030_eye	techno, industrial	ai, dot
 031_smoke	dub techno	ai, dot
