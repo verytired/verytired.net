@@ -108,7 +108,7 @@ def tile(i, n, root=""):
     return (f'<a class="tile" href="{href}" data-tags="{html.escape(",".join(i["tags"]))}">'
             f'<video src="{root}lab/{i["name"]}/loop.mp4" muted loop playsinline preload="none"></video>'
             f'<span class="cap"><b>#{n:03d}</b> <i>{html.escape(i["name"])}</i>'
-            f'<em>{html.escape(i["en"] or i["desc"])}</em>{tags(i) if root else ""}</span></a>')
+            f'<em title="{html.escape(i["en"] or i["desc"])}">{html.escape(i["en"] or i["desc"])}</em>{tags(i) if root else ""}</span></a>')
 
 
 def tags(i):
@@ -139,7 +139,7 @@ def music():
 def tool(name, desc, play, repo, video=""):
     v = f' / <a href="{html.escape(video)}">video</a>' if video else ""
     return (f'<div class="tile"><a href="{html.escape(play)}"><img src="{html.escape(name)}.jpg" alt="" loading="lazy"></a>'
-            f'<span class="cap"><i>{html.escape(name)}</i><em>{html.escape(desc)}</em>'
+            f'<span class="cap"><i>{html.escape(name)}</i><em title="{html.escape(desc)}">{html.escape(desc)}</em>'
             f'<em><a href="{html.escape(play)}">play</a> / <a href="{html.escape(repo)}">GitHub</a>{v}</em></span></div>')
 
 
