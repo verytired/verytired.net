@@ -168,7 +168,7 @@ def main():
         page = page.replace("{{%s}}" % k, v)
     (OUT / "index.html").write_text(page)
     page = (OUT / "template.html").read_text()
-    for k, v in {"HERO": "", "ITEMS": "\n".join(tile(i, n, "../") for n, i in numbered), "SUB": f"{len(items)} pieces · click to play live", "ROOT": "../"}.items():
+    for k, v in {"HERO": '<button id="filter" hidden></button>', "ITEMS": "\n".join(tile(i, n, "../") for n, i in numbered), "SUB": f"{len(items)} pieces · click to play live", "ROOT": "../"}.items():
         page = page.replace("{{%s}}" % k, v)
     (OUT / "audiovisual").mkdir(exist_ok=True)
     (OUT / "audiovisual" / "index.html").write_text(page)

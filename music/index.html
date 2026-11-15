@@ -60,6 +60,7 @@
     main .cap em:first-of-type { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
   }
   .tile[hidden] { display: none; }
+  #filter { font: inherit; margin: 16px 16px 0; padding: 1px 8px; background: var(--accent); color: var(--bg); border: 0; cursor: pointer; }  /* 絞り込み中のタグ。押すと全部に戻る */
   .cap .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
   .cap .tags span { border: 1px solid #3a3a3e; padding: 0 6px; color: var(--dim); cursor: pointer; }
   .cap .tags .audio::before { content: "♪ "; }
@@ -160,11 +161,18 @@ if (document.querySelector('.intro')) {
 let cur = '';
 document.querySelectorAll('.cap .tags span').forEach(s => s.addEventListener('click', e => {
   e.preventDefault(); e.stopPropagation();
-  cur = cur === s.dataset.tag ? '' : s.dataset.tag;
-  document.querySelectorAll('.cap .tags span').forEach(x => x.classList.toggle('on', x.dataset.tag === cur));
-  document.querySelectorAll('main .tile').forEach(t => t.hidden = cur && !t.dataset.tags.split(',').includes(cur));
-  if (cur) scrollTo(0, 0);
+  filter(cur === s.dataset.tag ? '' : s.dataset.tag);
 }));
+const filter = tag => {
+  cur = tag;
+  document.querySelectorAll('.cap .tags span').forEach(x => x.classList.toggle('on', x.dataset.tag === cur));
+  const shown = [...document.querySelectorAll('main .tile')].filter(t => !(t.hidden = cur && !t.dataset.tags.split(',').includes(cur))).length;
+  const f = document.getElementById('filter');
+  f.hidden = !cur;
+  f.textContent = cur && `${cur.replace('audio:', '♪ ').replace('visual:', '')} — ${shown} pieces ×`;
+  if (cur) scrollTo(0, 0);
+};
+document.getElementById('filter')?.addEventListener('click', () => filter(''));
 
 // 見えている動画だけ再生する
 const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? e.target.play().catch(() => {}) : e.target.pause()));
