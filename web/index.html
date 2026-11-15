@@ -55,12 +55,6 @@
   .tile:hover .cap b { background: var(--accent); color: var(--bg); }
   /* 一覧の説明は3行まで（続きは作品のページに全文がある） */
   main .cap em:first-of-type { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
-  /* 切れた説明は、マウスを載せると全文を動画の上に重ねて出す（data-full は下の JS が切れたときだけ付ける） */
-  .cap { position: relative; }
-  @media (hover: hover) {
-    .cap[data-full]:hover::after { content: attr(data-full); position: absolute; left: 0; right: 0; bottom: 100%; padding: 8px;
-                                   background: rgb(18 18 20 / .92); color: var(--fg); pointer-events: none; }
-  }
   /* スマホ: ヘッダーは1段（右の小さな文字は出さない） */
   @media (max-width: 600px) {
     header { gap: 12px; }
@@ -90,9 +84,9 @@
 </header>
 
 <main>
-<div class="tile"><a href="https://verytired.github.io/afterbirth/"><img src="afterbirth.jpg" alt="" loading="lazy"></a><span class="cap"><i>afterbirth</i><em>A browser acid groovebox: two 303-style bass lines, 808 and 909 drums, mixer and effects, all in pure Web Audio.</em><em><a href="https://verytired.github.io/afterbirth/">play</a> / <a href="https://github.com/verytired/afterbirth">GitHub</a> / <a href="https://youtu.be/M-HQHGlID6c">video</a></em></span></div>
-<div class="tile"><a href="https://verytired.net/web/notice/"><img src="notice.jpg" alt="" loading="lazy"></a><span class="cap"><i>notice</i><em>X に投稿された「ご報告」の画像を集めて、何を報告しているか・どんな言葉で書かれているかで並べ替えたページ。</em><em><a href="https://verytired.net/web/notice/">play</a> / <a href="https://github.com/verytired/notice">GitHub</a></em></span></div>
-<div class="tile"><a href="https://verytired.net/web/blinkcam/"><img src="blinkcam.jpg" alt="" loading="lazy"></a><span class="cap"><i>blinkcam</i><em>Blink to take a picture: your webcam watches your eyes, every blink snaps a numbered eye shot onto the screen while a drone tightens the longer you hold them open; all in the browser, nothing leaves your device.</em><em><a href="https://verytired.net/web/blinkcam/">play</a> / <a href="https://github.com/verytired/blinkcam">GitHub</a></em></span></div>
+<div class="tile"><a href="https://verytired.github.io/afterbirth/"><img src="afterbirth.jpg" alt="" loading="lazy"></a><span class="cap"><i>afterbirth</i><em title="A browser acid groovebox: two 303-style bass lines, 808 and 909 drums, mixer and effects, all in pure Web Audio.">A browser acid groovebox: two 303-style bass lines, 808 and 909 drums, mixer and effects, all in pure Web Audio.</em><em><a href="https://verytired.github.io/afterbirth/">play</a> / <a href="https://github.com/verytired/afterbirth">GitHub</a> / <a href="https://youtu.be/M-HQHGlID6c">video</a></em></span></div>
+<div class="tile"><a href="https://verytired.net/web/notice/"><img src="notice.jpg" alt="" loading="lazy"></a><span class="cap"><i>notice</i><em title="X に投稿された「ご報告」の画像を集めて、何を報告しているか・どんな言葉で書かれているかで並べ替えたページ。">X に投稿された「ご報告」の画像を集めて、何を報告しているか・どんな言葉で書かれているかで並べ替えたページ。</em><em><a href="https://verytired.net/web/notice/">play</a> / <a href="https://github.com/verytired/notice">GitHub</a></em></span></div>
+<div class="tile"><a href="https://verytired.net/web/blinkcam/"><img src="blinkcam.jpg" alt="" loading="lazy"></a><span class="cap"><i>blinkcam</i><em title="Blink to take a picture: your webcam watches your eyes, every blink snaps a numbered eye shot onto the screen while a drone tightens the longer you hold them open; all in the browser, nothing leaves your device.">Blink to take a picture: your webcam watches your eyes, every blink snaps a numbered eye shot onto the screen while a drone tightens the longer you hold them open; all in the browser, nothing leaves your device.</em><em><a href="https://verytired.net/web/blinkcam/">play</a> / <a href="https://github.com/verytired/blinkcam">GitHub</a></em></span></div>
 </main>
 <footer>
   <p><b>veryTired</b></p>
@@ -169,11 +163,6 @@ const filter = tag => {
   if (cur) scrollTo(0, 0);
 };
 document.getElementById('filter')?.addEventListener('click', () => filter(''));
-
-// 3行（トップは2行）で切れた説明だけ、全文を data-full に入れる。ponytail: 読み込み時に1回だけ測る。窓の幅を変えたあとは測り直さない
-document.querySelectorAll('main .cap em:first-of-type, .latest .cap em').forEach(e => {
-  if (e.scrollHeight > e.clientHeight + 1) e.parentNode.dataset.full = e.textContent;
-});
 
 // 見えている動画だけ再生する
 const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? e.target.play().catch(() => {}) : e.target.pause()));
