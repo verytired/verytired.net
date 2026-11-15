@@ -53,11 +53,12 @@
   .cap em a { color: var(--accent); }
   .cap em a:hover { text-decoration: underline; }
   .tile:hover .cap b { background: var(--accent); color: var(--bg); }
-  /* スマホ: ヘッダーは1段（右の小さな文字は出さない）、一覧の説明は3行まで */
+  /* 一覧の説明は3行まで（続きは作品のページに全文がある） */
+  main .cap em:first-of-type { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  /* スマホ: ヘッダーは1段（右の小さな文字は出さない） */
   @media (max-width: 600px) {
     header { gap: 12px; }
     header span { display: none; }
-    main .cap em:first-of-type { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
   }
   .tile[hidden] { display: none; }
   #filter { font: inherit; margin: 16px 16px 0; padding: 1px 8px; background: var(--accent); color: var(--bg); border: 0; cursor: pointer; }  /* 絞り込み中のタグ。押すと全部に戻る */
