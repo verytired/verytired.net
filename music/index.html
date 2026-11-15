@@ -55,6 +55,12 @@
   .tile:hover .cap b { background: var(--accent); color: var(--bg); }
   /* 一覧の説明は3行まで（続きは作品のページに全文がある） */
   main .cap em:first-of-type { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  /* 切れた説明は、マウスを載せると全文を動画の上に重ねて出す（data-full は下の JS が切れたときだけ付ける） */
+  .cap { position: relative; }
+  @media (hover: hover) {
+    .cap[data-full]:hover::after { content: attr(data-full); position: absolute; left: 0; right: 0; bottom: 100%; padding: 8px;
+                                   background: rgb(18 18 20 / .92); color: var(--fg); pointer-events: none; }
+  }
   /* スマホ: ヘッダーは1段（右の小さな文字は出さない） */
   @media (max-width: 600px) {
     header { gap: 12px; }
@@ -174,6 +180,11 @@ const filter = tag => {
   if (cur) scrollTo(0, 0);
 };
 document.getElementById('filter')?.addEventListener('click', () => filter(''));
+
+// 3行（トップは2行）で切れた説明だけ、全文を data-full に入れる。ponytail: 読み込み時に1回だけ測る。窓の幅を変えたあとは測り直さない
+document.querySelectorAll('main .cap em:first-of-type, .latest .cap em').forEach(e => {
+  if (e.scrollHeight > e.clientHeight + 1) e.parentNode.dataset.full = e.textContent;
+});
 
 // 見えている動画だけ再生する
 const io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? e.target.play().catch(() => {}) : e.target.pause()));
