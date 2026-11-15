@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Datum</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas#c { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="16"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<video src="src/dove_v1.mp4" muted playsinline preload="auto"></video>
+
+<script>
+// 黒地で羽ばたく白い鳩（Veo の8秒）を、毎コマ測る：明るい画素の重心・主軸の傾き・翼の幅。
+// キックごとに、実写 → 白地の点 → 実写に点をつないだ網 と切り替え、羽を上げきる瞬間だけ鳩は自分の測った数値の文字でできた形になる。
+// 最後は点が重心へ縮んで黒に戻る。音は翼の幅でフィルターが開閉する低いドローンと、羽を上げきる瞬間のクリック、90 BPM の遅いキック
+const BPM = 90, BEAT = 60 / BPM, BAR = 4 * BEAT, LOOP = 6 * BAR;   // LOOP = 16秒
+const RATE = 30, SPEED = 0.5;   // 動画の8秒を16秒で一度だけ。測るのは動画の1/30秒ごと
+const vid = document.querySelector('video'); vid.playbackRate = SPEED;
+const lerp = (a, b, x) => a + (b - a) * Math.min(1, Math.max(0, x));
+const hash = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); };
+
+// ---- 測る ----
+const AW = 72, AH = 128, THR = 90;   // 測る解像度（動画を縮めた画素）と、鳩とみなす明るさ
+const an = document.createElement('canvas'); an.width = AW; an.height = AH;
+const ag = an.getContext('2d', { willReadFrequently: true });
+function measure() {   // 今の動画のコマを測る
+  ag.drawImage(vid, 0, 0, AW, AH);
+  const d = ag.getImageData(0, 0, AW, AH).data, lum = new Uint8Array(AW * AH);
+  let n = 0, sx = 0, sy = 0;
+  for (let i = 0; i < AW * AH; i++) {
+    const x = i % AW, y = (i / AW) | 0;
+    const l = (x - 36) ** 2 + (y - 6.5) ** 2 < 110 ? 0 : (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8;   // 上の電球は測らない
+    lum[i] = l;
+    if (l > THR) { n++; sx += i % AW; sy += (i / AW) | 0; }
+  }
+  const cx = n ? sx / n : AW / 2, cy = n ? sy / n : AH / 2;
+  let xx = 0, yy = 0, xy = 0;
+  for (let i = 0; i < AW * AH; i++) if (lum[i] > THR) {
+    const x = i % AW - cx, y = ((i / AW) | 0) - cy; xx += x * x; yy += y * y; xy += x * y;
+  }
+  const tilt = 0.5 * Math.atan2(2 * xy, xx - yy);   // 主軸の傾き
+  const span = n ? 4 * Math.sqrt(xx / n) / AW : 0;  // 翼の幅：横の散らばり（翼の先が画面から出るので端から端は使わない）
+  return { lum, cx, cy, tilt, span, n };
+}
+let SER = [], PEAK = [];   // 動画の1/30秒ごとの span・tilt と、羽を上げきったコマ
+async function analyse() {
+  await new Promise(r => vid.readyState >= 1 ? r() : vid.addEventListener('loadedmetadata', r, { once: true }));
+  const K = Math.floor(vid.duration * RATE);
+  for (let k = 0; k < K; k++) {
+    vid.currentTime = (k + 0.5) / RATE;
+    await new Promise(r => vid.addEventListener('seeked', r, { once: true }));
+    const m = measure(); SER.push({ span: m.span, tilt: m.tilt, n: m.n });
+  }
+  const lo = Math.min(...SER.map(s => s.span)), hi = Math.max(...SER.map(s => s.span));
+  SER.forEach(s => s.u = (s.span - lo) / (hi - lo || 1));   // 0 羽を上げきった … 1 広げきった
+  const W8 = 12;   // 前後 W8 コマで一番狭いコマを「羽を上げきった」とする
+  for (let k = W8; k < K; k++) {
+    let top = true; for (let j = k - W8; j <= Math.min(K - 1, k + W8); j++) if (SER[j].span < SER[k].span) top = false;
+    if (top && (!PEAK.length || k - PEAK[PEAK.length - 1] > W8)) PEAK.push(k);
+  }
+  vid.currentTime = 0;
+  buildEv();
+}
+const ser = tl => SER[Math.min(SER.length - 1, Math.floor(tl * SPEED * RATE))] || { span: 0, tilt: 0, n: 0, u: 0 };
+const peakNear = tl => { const k = tl * SPEED * RATE; for (const p of PEAK) if (Math.abs(p - k) < 2.5) return p; return -1; };
+
+// ---- 譜面 ----
+const EV = [];
+function buildEv() {
+  for (let bar = 0; bar < 6; bar++) {
+    const at = b => bar * BAR + b * BEAT;
+    if (bar === 0) { EV.push({ t: at(0), type: 'kick', v: 1 }); continue; }
+    for (const b of bar % 2 ? [0, 2.5] : [0, 1.75, 2.5]) EV.push({ t: at(b), type: 'kick', v: b ? 0.8 : 1 });
+  }
+  for (const p of PEAK) { const t = p / RATE / SPEED; if (t > BAR && t < 5 * BAR) EV.push({ t, type: 'click', v: 1 }); }
+  EV.sort((a, b) => a.t - b.t);
+}
+const kicksBefore = tl => { let n = 0, lt = -99; for (const e of EV) { if (e.t > tl) break; if (e.type === 'kick') { n++; lt = e.t; } } return [n, lt]; };
+
+// ---- 音 ----
+let ac = null, t0 = 0, out, lp, nextEv = 0, loopN = 0, nextK = 0;
+function audio() {
+  if (ac) return;
+  vid.play();
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 4;
+  out = ac.createGain(); out.gain.value = 0.6; out.connect(comp); comp.connect(ac.destination);
+  window.audioDest = ac.createMediaStreamDestination ? ac.createMediaStreamDestination() : null;
+  if (audioDest) comp.connect(audioDest);
+  // 低いドローン：D1 のこぎり波2本（少しずらす）を、翼の幅で開閉するローパスへ
+  lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 120; lp.Q.value = 7;
+  const dg = ac.createGain(); dg.gain.value = 0.16; lp.connect(dg); dg.connect(out);
+  [36.7, 36.95, 55.1].forEach((f, i) => { const o = ac.createOscillator(); o.type = i < 2 ? 'sawtooth' : 'sine'; o.frequency.value = f; o.connect(lp); o.start(); });
+  t0 = ac.currentTime + 0.05;
+  setInterval(schedule, 25); schedule();
+}
+function schedule() {
+  for (;;) {   // 翼の幅 → フィルター（1/30秒ごと）
+    const t = t0 + nextK / RATE; if (t > ac.currentTime + 0.2) break;
+    const tl = (nextK / RATE) % LOOP; nextK++;
+    if (t < ac.currentTime - 0.05) continue;
+    lp.frequency.setTargetAtTime(90 + ser(tl).u ** 2 * 1800 * (tl < 5 * BAR ? 1 : lerp(1, 0, (tl - 5 * BAR) / BAR)), t, 0.03);
+  }
+  for (;;) {
+    if (!EV.length) break;
+    if (nextEv >= EV.length) { nextEv = 0; loopN++; }
+    const e = EV[nextEv], t = t0 + loopN * LOOP + e.t;
+    if (t > ac.currentTime + 0.2) break;
+    nextEv++;
+    if (t < ac.currentTime - 0.05) continue;
+    e.type === 'kick' ? kick(t, e.v) : click(t);
+  }
+}
+function kick(t, v) {   // 低く長いキック（歪ませない）
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.frequency.setValueAtTime(100, t); o.frequency.exponentialRampToValueAtTime(34, t + 0.2);
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.001, t + 1);
+  o.connect(g); g.connect(out); o.start(t); o.stop(t + 1.02);
+}
+function click(t) {   // 羽を上げきった瞬間：短いノイズを高く絞り、低いサインを一拍だけ
+  const b = ac.createBuffer(1, 2400, ac.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / 180);
+  const s = ac.createBufferSource(); s.buffer = b;
+  const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 3200; bp.Q.value = 3;
+  const g = ac.createGain(); g.gain.value = 0.35; s.connect(bp); bp.connect(g); g.connect(out); s.start(t);
+  const o = ac.createOscillator(), og = ac.createGain(); o.frequency.value = 73.4;
+  og.gain.setValueAtTime(0.25, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+  o.connect(og); og.connect(out); o.start(t); o.stop(t + 0.52);
+}
+
+// ---- 映像 ----
+const c = document.getElementById('c'), g = c.getContext('2d');
+let W, H, sc, ox, oy;
+function setSize() {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  c.width = W; c.height = H;
+}
+function fit() {   // 動画を画面に置く：幅を合わせ、少し小さく
+  const vw = vid.videoWidth || 720, vh = vid.videoHeight || 1280;
+  sc = Math.max(W / vw, H / vh) * 0.78; ox = (W - vw * sc) / 2; oy = (H - vh * sc) / 2;
+  return [vw * sc, vh * sc];
+}
+const X = ax => ox + ax / AW * (vid.videoWidth || 720) * sc;
+const Y = ay => oy + ay / AH * (vid.videoHeight || 1280) * sc;
+const MONO = 'ui-monospace, Menlo, monospace';
+
+function drawReal(m, dim) {   // 実写を白黒・高コントラストで
+  const [vw, vh] = fit();
+  g.drawImage(vid, ox, oy, vw, vh);   // 素材が白黒なので色はいじらない（filter をかけると枠が灰色に浮いた）
+  if (dim < 1) { g.fillStyle = `rgba(0,0,0,${1 - dim})`; g.fillRect(0, 0, W, H); }
+}
+function hud(m, tl, k) {   // 最小限の計測線：主軸に沿った翼の幅、重心、数値
+  const px = W / 1080, cx = X(m.cx), cy = Y(m.cy), L = m.span * (vid.videoWidth || 720) * sc * 0.5;
+  const ex = L, ey = 0;   // 翼の幅は水平に引く（主軸は羽の上げ下げで縦横が入れ替わり、線が暴れる）
+  g.strokeStyle = '#fff'; g.lineWidth = 1.5 * px;
+  g.beginPath(); g.moveTo(cx - ex, cy - ey); g.lineTo(cx + ex, cy + ey); g.stroke();
+  for (const s of [-1, 1]) { g.beginPath(); g.arc(cx + s * ex, cy + s * ey, 5 * px, 0, 7); g.stroke(); }
+  g.strokeRect(cx - 6 * px, cy - 6 * px, 12 * px, 12 * px);
+  g.font = `${15 * px}px ${MONO}`; g.fillStyle = '#fff';
+  g.fillText(`span ${m.span.toFixed(3)}`, cx + ex + 12 * px, cy + ey);
+  g.fillText(`tilt ${(m.tilt * 57.3 - 90 * Math.sign(m.tilt)).toFixed(1)}°`, cx + 10 * px, cy - 10 * px);
+  g.fillText(`f ${String(k).padStart(3, '0')}`, 28 * px, 44 * px);
+}
+function dots(m, pull) {   // 白地の点：明るい画素から、明るさに比例した確率で点を打つ
+  const px = W / 1080, cx = X(m.cx), cy = Y(m.cy);
+  g.fillStyle = pull > 0 ? '#fff' : '#000';
+  for (let i = 0; i < AW * AH; i++) {
+    const l = m.lum[i]; if (l < THR) continue;
+    const ax = i % AW, ay = (i / AW) | 0;
+    if (hash(ax, ay) > (l - THR) / (255 - THR) * 1.4) continue;
+    let x = X(ax + hash(ay, ax)), y = Y(ay + hash(ax + 7, ay));
+    x = lerp(x, cx, pull); y = lerp(y, cy, pull);
+    const r = (1.2 + 2 * hash(ax + 3, ay + 5)) * px;
+    g.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+}
+function net(m) {   // 網：6×6 画素のかたまりごとに一番明るい画素を節にし、近い3つと線でつなぐ。節には座標のラベル
+  const px = W / 1080, B = 6, nodes = [];
+  for (let by = 0; by < AH; by += B) for (let bx = 0; bx < AW; bx += B) {
+    let best = THR + 40, bi = -1;
+    for (let y = by; y < Math.min(AH, by + B); y++) for (let x = bx; x < Math.min(AW, bx + B); x++) if (m.lum[y * AW + x] > best) { best = m.lum[y * AW + x]; bi = y * AW + x; }
+    if (bi >= 0) nodes.push({ ax: bi % AW, ay: (bi / AW) | 0, x: X(bi % AW), y: Y((bi / AW) | 0) });
+  }
+  g.lineWidth = 1 * px;
+  nodes.forEach((a, i) => {
+    const near = nodes.map((b, j) => [(a.x - b.x) ** 2 + (a.y - b.y) ** 2, j]).filter(e => e[1] !== i).sort((p, q) => p[0] - q[0]).slice(0, 3);
+    for (const [, j] of near) { if (j < i) continue; const b = nodes[j]; g.strokeStyle = (i + j) % 3 ? 'rgba(255,255,255,.7)' : 'rgba(230,40,50,.85)'; g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke(); }
+  });
+  g.font = `${10 * px}px ${MONO}`;
+  nodes.forEach((a, i) => {
+    g.fillStyle = '#fff'; g.fillRect(a.x - 2.5 * px, a.y - 2.5 * px, 5 * px, 5 * px);
+    if (i % 3 === 0) g.fillText(`${(a.ax / AW).toFixed(2)},${(a.ay / AH).toFixed(2)}`, a.x + 5 * px, a.y - 4 * px);
+  });
+}
+function digits(m, tl, k) {   // 数値の鳩：画面を小さな升に割り、鳩の明るい升にだけ、測った数値の文字を順に置く
+  const px = W / 1080, cs = 13 * px;
+  const str = `f${k} span${m.span.toFixed(3)} tilt${(m.tilt * 57.3).toFixed(1)} x${(m.cx / AW).toFixed(3)} y${(m.cy / AH).toFixed(3)} `;
+  g.font = `${cs * 1.05}px ${MONO}`; g.fillStyle = '#fff';
+  let n = Math.floor(tl * 40);   // 文字は体に沿って流れる
+  for (let y = 0; y < H; y += cs * 1.25) for (let x = 0; x < W; x += cs * 0.75) {
+    const ax = Math.floor(((x - ox) / sc) / (vid.videoWidth || 720) * AW), ay = Math.floor(((y - oy) / sc) / (vid.videoHeight || 1280) * AH);
+    if (ax < 0 || ay < 0 || ax >= AW || ay >= AH || m.lum[ay * AW + ax] < THR) continue;
+    g.fillText(str[n++ % str.length], x, y);
+  }
+}
+
+let prevTl = 0;
+function frame() {
+  requestAnimationFrame(frame);
+  if (!SER.length) return;
+  const tl = ac ? Math.max(0, ac.currentTime - t0) % LOOP : (performance.now() / 1000) % LOOP;
+  const vt = Math.min(tl * SPEED, vid.duration - 0.02);
+  if (Math.abs(vid.currentTime - vt) > 0.15) vid.currentTime = vt;
+  if (vid.readyState < 2) return;
+  const m = measure(), k = Math.floor(vt * RATE), B = tl / BAR;
+  const [nk, lk] = kicksBefore(tl), kHit = Math.exp(-(tl - lk) / 0.12);
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  if (B >= 5) {   // 最後の小節：点が重心へ縮み、黒に戻る
+    const pull = (B - 5) ** 1.5;
+    dots(m, Math.max(0.001, pull)); return;
+  }
+  if (B >= 1 && peakNear(tl) >= 0) { digits(m, tl, k); return; }
+  const mode = B < 1 ? 0 : nk % 3;   // 0 実写＋計測線／1 白地の点／2 実写＋網
+  if (mode === 1) { g.fillStyle = '#f4f4f0'; g.fillRect(0, 0, W, H); dots(m, 0); }
+  else { drawReal(m, mode === 2 ? 0.75 : 1); if (mode === 2) net(m); else if (B > 0.25) hud(m, tl, k); }
+  if (kHit > 0.5 && B >= 1) { g.fillStyle = `rgba(255,255,255,${(kHit - 0.5) * 0.4})`; g.fillRect(0, 0, W, H); }
+}
+
+document.getElementById('aspect').onchange = setSize; setSize();
+const ready = analyse();
+requestAnimationFrame(frame);
+document.getElementById('play').onclick = audio;
+c.onpointerdown = audio;
+
+document.getElementById('rec').onclick = e => {
+  audio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `datum_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+window.piece = { ready: () => ready, media: () => [vid], output: () => out };
+</script>
+</body>
+</html>
