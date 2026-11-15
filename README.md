@@ -27,6 +27,7 @@ Pages use `template.html`; the piece player is `player.html`.
 | File | Format |
 | --- | --- |
 | `en.tsv` | `folder<TAB>English description` |
+| `tags.tsv` | `folder<TAB>audio tags<TAB>visual tags` (comma-separated) — filter buttons on `audiovisual/` |
 | `youtube.tsv` | `folder<TAB>YouTube URL` — adds a YouTube link to that piece's player |
 | `music.tsv` | `title<TAB>URL` — YouTube URL, or the `src` of a Bandcamp embed |
 | `web.tsv` | `name<TAB>description<TAB>play URL<TAB>GitHub URL<TAB>video URL (optional)`; image at `web/<name>.jpg` |
