@@ -24,7 +24,7 @@ LAB = OUT / "lab"
 # YouTube に上げた長い版（タブ区切り: フォルダ名\tURL）。あれば作品のページの操作バーにリンクを出す
 YT = dict(l.split("\t", 1) for l in (OUT / "youtube.tsv").read_text().splitlines() if "\t" in l) if (OUT / "youtube.tsv").exists() else {}
 EN = dict(l.split("\t", 1) for l in (OUT / "en.tsv").read_text().splitlines() if "\t" in l) if (OUT / "en.tsv").exists() else {}
-# タグ（タブ区切り: フォルダ名\t音のタグ\t映像のタグ、タグどうしは「, 」）。audiovisual/ の上にボタンで並べて絞り込む
+# タグ（タブ区切り: フォルダ名\t音のタグ\t映像のタグ、タグどうしは「, 」）。audiovisual/ の各作品の説明の後ろに出し、押すと絞り込む
 TAGS = {r[0]: [f"{k}:{t.strip()}" for k, c in zip(("audio", "visual"), r[1:3]) for t in c.split(",") if t.strip()]
         for r in (l.split("\t") + ["", ""] for l in (OUT / "tags.tsv").read_text().splitlines() if "\t" in l)} if (OUT / "tags.tsv").exists() else {}
 
@@ -108,21 +108,13 @@ def tile(i, n, root=""):
     return (f'<a class="tile" href="{href}" data-tags="{html.escape(",".join(i["tags"]))}">'
             f'<video src="{root}lab/{i["name"]}/loop.mp4" muted loop playsinline preload="none"></video>'
             f'<span class="cap"><b>#{n:03d}</b> <i>{html.escape(i["name"])}</i>'
-            f'<em>{html.escape(i["en"] or i["desc"])}</em></span></a>')
+            f'<em>{html.escape(i["en"] or i["desc"])}</em>{tags(i) if root else ""}</span></a>')
 
 
-def tagbar(items):
-    """audiovisual/ の上のタグのボタン。音・映像ごとに多い順。押すとそのタグの作品だけ残る（template.html の JS）"""
-    count = {}
-    for i in items:
-        for t in i["tags"]:
-            count[t] = count.get(t, 0) + 1
-    rows = []
-    for k in ("audio", "visual"):
-        ts = sorted((t for t in count if t.startswith(k + ":")), key=lambda t: (-count[t], t))
-        rows.append(f'<p><span>{k}</span>' + "".join(
-            f'<button data-tag="{html.escape(t)}">{html.escape(t.split(":", 1)[1])} <small>{count[t]}</small></button>' for t in ts) + "</p>")
-    return '<nav class="tags">' + "".join(rows) + "</nav>"
+def tags(i):
+    """説明の後ろのタグ（audiovisual/ だけ）。押すとそのタグの作品だけ残る（template.html の JS）。a の中なのでボタンでなく span"""
+    return '<span class="tags">' + "".join(f'<span data-tag="{html.escape(t)}" class="{t.split(":")[0]}">{html.escape(t.split(":", 1)[1])}</span>' for t in i["tags"]) + "</span>" if i["tags"] else ""
+
 
 
 def track(title, url):
@@ -176,7 +168,7 @@ def main():
         page = page.replace("{{%s}}" % k, v)
     (OUT / "index.html").write_text(page)
     page = (OUT / "template.html").read_text()
-    for k, v in {"HERO": tagbar(items), "ITEMS": "\n".join(tile(i, n, "../") for n, i in numbered), "SUB": f"{len(items)} pieces · click to play live", "ROOT": "../"}.items():
+    for k, v in {"HERO": "", "ITEMS": "\n".join(tile(i, n, "../") for n, i in numbered), "SUB": f"{len(items)} pieces · click to play live", "ROOT": "../"}.items():
         page = page.replace("{{%s}}" % k, v)
     (OUT / "audiovisual").mkdir(exist_ok=True)
     (OUT / "audiovisual" / "index.html").write_text(page)

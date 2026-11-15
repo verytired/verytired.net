@@ -59,15 +59,11 @@
     header span { display: none; }
     main .cap em:first-of-type { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
   }
-  /* audiovisual/ のタグ。押したタグの作品だけ残す（もう一度押すと全部） */
-  .tags { padding: 16px 16px 0; }
   .tile[hidden] { display: none; }
-  .tags p { margin: 0 0 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
-  .tags span { color: var(--dim); width: 4em; }
-  .tags button { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid #3a3a3e; padding: 1px 8px; cursor: pointer; }
-  .tags button small { color: var(--dim); font-size: inherit; }
-  .tags button:hover, .tags button[aria-pressed="true"] { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-  .tags button:hover small, .tags button[aria-pressed="true"] small { color: var(--bg); }
+  .cap .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .cap .tags span { border: 1px solid #3a3a3e; padding: 0 6px; color: var(--dim); cursor: pointer; }
+  .cap .tags .audio::before { content: "♪ "; }
+  .cap .tags span:hover, .cap .tags span.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
   footer { padding: 48px 16px 32px; color: var(--dim); }
   footer p { margin: 0 0 4px; }
   footer b { color: var(--fg); font-weight: normal; }
@@ -147,11 +143,14 @@ if (document.querySelector('.intro')) {
   addEventListener('scroll', f, { passive: true }); f();
 }
 
-// タグで絞り込む（一度に1つ。同じタグをもう一度押すと解除）
-document.querySelectorAll('.tags button').forEach(b => b.addEventListener('click', () => {
-  const on = b.getAttribute('aria-pressed') !== 'true';
-  document.querySelectorAll('.tags button').forEach(x => x.setAttribute('aria-pressed', x === b && on));
-  document.querySelectorAll('main .tile').forEach(t => t.hidden = on && !t.dataset.tags.split(',').includes(b.dataset.tag));
+// 説明の後ろのタグを押すと、そのタグの作品だけ残す（同じタグをもう一度押すと全部に戻る）。作品へのリンクは開かない
+let cur = '';
+document.querySelectorAll('.cap .tags span').forEach(s => s.addEventListener('click', e => {
+  e.preventDefault(); e.stopPropagation();
+  cur = cur === s.dataset.tag ? '' : s.dataset.tag;
+  document.querySelectorAll('.cap .tags span').forEach(x => x.classList.toggle('on', x.dataset.tag === cur));
+  document.querySelectorAll('main .tile').forEach(t => t.hidden = cur && !t.dataset.tags.split(',').includes(cur));
+  if (cur) scrollTo(0, 0);
 }));
 
 // 見えている動画だけ再生する
