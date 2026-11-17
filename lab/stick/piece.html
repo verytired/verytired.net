@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stick</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="21.3"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<video id="va" src="src/selfie_v1.mp4" muted loop playsinline preload="auto"></video>
+
+<script>
+// 白黒の自撮り（Veo）を、回路を曲げたゲームボーイカメラに通す。
+// センサー（128×112、露出と輪郭強調）→ 4×4 のディザで 4 階調 → カートリッジの RAM に 8×8 のタイル 16×14 枚として書く →
+// 画面がタイルを読んで行ごとに並べる → 反応の遅い液晶。崩れは見た目を作らず、この書き写しの途中のベンドだけで出す：
+//   書き込みが止まるタイル（張り付く：その瞬間の顔が残り、今の顔と二重に映る）、書き込みのアドレス線が立ちっぱなし（同じタイルが別の所にも書かれて増える）、
+//   読み出しのアドレス線（タイルの列が繰り返し・入れ替わって読まれる）、行のカウンターが止まる（1 行が下まで繰り返されて縦縞）、データ線の短絡（段が跳ぶ）。
+// 音もゲームボーイの 4 音（矩形波 2・波形メモリ・ノイズ）。読み出しのアドレス線は波形メモリの読み出しにも触れ、同じ瞬間にベースの音色が崩れる。
+// 参考：glitch_wolfe「Game Boy Camera glitches, double exposure edition」（#glitchtober の Clone）
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+const VA = document.getElementById('va');
+const BEAT = 60 / 90, S16 = BEAT / 4, BAR = 4 * BEAT, NBAR = 8, LOOP = NBAR * BAR;   // 約 21.3 秒
+
+// ---- 譜面：音も映像もここから読む ----
+// 暗いブレイクビーツ。キックは矩形波の周波数スイープ、スネアとハットはノイズ（15 ビットと 7 ビットの LFSR）、
+// ベースは波形メモリ、上は 12.5% の矩形波の低い持続音だけ（メロディは鳴らさない）。
+// 0 小節目は持続音とベースだけで、絵は崩さない。7 小節目の後半は書き込みが全部止まり、行のカウンターが止まって電源が落ちる
+const EV = [];
+const KICK = [[0, 10], [0, 7, 10]], SNARE = [4, 12];
+const BASS = [[0, 'D', 6], [7, 'F', 2], [10, 'D', 3], [14, 'C', 2]];
+const NOTE = { C: 32.70, D: 36.71, F: 43.65, A: 55.0, Bb: 58.27 };
+const hash = (a, b) => { const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return x - Math.floor(x); };
+for (let bar = 0; bar < NBAR; bar++) {
+  const T = bar * BAR, end = bar === NBAR - 1, n16 = end ? 8 : 16;
+  EV.push({ t: T, type: 'drone', f: [146.8, 146.8, 110, 116.5][(bar >> 1) % 4], len: end ? BAR / 2 : BAR });
+  for (const [s, n, l] of BASS) if (s < n16) EV.push({ t: T + s * S16, type: 'bass', f: NOTE[bar % 4 === 3 && n === 'D' && s === 10 ? 'Bb' : n] * 2, len: l * S16 });
+  if (bar === 0) continue;
+  for (const s of KICK[bar % 2]) if (s < n16) EV.push({ t: T + s * S16, type: 'kick', stick: !(s === 0) });
+  if (bar >= 2) for (const s of SNARE) if (s < n16) EV.push({ t: T + s * S16, type: 'snare' });
+  if (bar >= 2 && bar % 2 === 1 && !end) EV.push({ t: T + 15 * S16, type: 'ghost' });
+  for (let s = 0; s < n16; s += 2) EV.push({ t: T + s * S16, type: 'hat', v: s % 4 === 2 ? 1 : 0.5, line: bar >= 4 && s % 4 === 2 });
+  if (bar >= 3 && !end) EV.push({ t: T + 14 * S16, type: 'ohat' });
+}
+EV.push({ t: (NBAR - 0.75) * BAR, type: 'off' });
+EV.sort((a, b) => a.t - b.t);
+const lastEv = (tl, type) => { let x = null; for (const e of EV) { if (e.t > tl) break; if (e.type === type) x = e; } return x; };
+
+// ベンドの状態は時刻だけで決まる（映像と音が同じものを読む）
+function bendAt(t) {
+  const b = { rxo: 0, rxx: 0, ryo: 0, wor: 0, line: -1, dshort: false };
+  const sn = lastEv(t, 'snare'), gh = lastEv(t, 'ghost'), ht = lastEv(t, 'hat');
+  if (sn && t - sn.t < BEAT / 2) {   // スネア：読み出しのタイルの列のアドレス線が立つ／隣と短絡。半分の確率で書き込みのアドレス線も
+    const r = hash(sn.t, 1), r2 = hash(sn.t, 2);
+    if (r < 0.6) b.rxo = 1 << (r * 4 / 0.6 | 0); else b.rxx = 1 << ((r - 0.6) * 10 | 0);
+    if (r2 < 0.35) b.ryo = 1 << (r2 * 8 | 0);
+    if (r2 > 0.5 && t - sn.t < S16) b.wor = 1 << (r2 * 14 % 7 | 0);
+  }
+  if (gh && t - gh.t < S16) b.dshort = true;
+  if (ht && ht.line && t - ht.t < S16 * 0.8) b.line = 8 + (hash(ht.t, 3) * 96 | 0);   // 行のカウンターが止まる
+  return b;
+}
+
+// ---- 音：ゲームボーイの 4 音を、1 音ずつバッファに計算して鳴らす ----
+let ac = null, t0 = 0, out, nextEv = 0, loopN = 0;
+const DUTY = [0.125, 0.25, 0.5, 0.75];
+function buf(len, fn) { const n = Math.ceil(len * ac.sampleRate), b = ac.createBuffer(1, n, ac.sampleRate), d = b.getChannelData(0); fn(d, ac.sampleRate); return b; }
+// 4 ビットの音量エンベロープ：vol から 1/64 秒 × step ごとに 1 下がる（step 0 は下がらない）
+const vol = (v0, step, t) => step ? Math.max(0, v0 - Math.floor(t * 64 / step)) / 15 : v0 / 15;
+function play(b, t, g = 1) { const s = ac.createBufferSource(); s.buffer = b; const gg = ac.createGain(); gg.gain.value = g; s.connect(gg); gg.connect(out); s.start(t); }
+function pulse(f0, duty, len, v0, step, sweep) {   // 矩形波（スイープつき：1/128 秒 × sweep.time ごとに周波数レジスタ x から x >> shift を引く）
+  return buf(len, (d, sr) => {
+    let x = 2048 - 131072 / f0, ph = 0;
+    for (let i = 0; i < d.length; i++) {
+      const t = i / sr;
+      if (sweep && i % Math.round(sr * sweep.time / 128) === 0 && i) x = Math.max(0, x - (x >> sweep.shift));
+      const f = 131072 / (2048 - x); ph = (ph + f / sr) % 1;
+      d[i] = (ph < duty ? 1 : -1) * vol(v0, step, t);
+    }
+  });
+}
+function noise(r, s, short, len, v0, step) {   // LFSR：524288 / r / 2^(s+1) Hz で 1 ビットずつ送る。short は 7 ビット（金属っぽい）
+  return buf(len, (d, sr) => {
+    const f = 524288 / (r || 0.5) / Math.pow(2, s + 1); let lf = 0x7fff, acc = 0;
+    for (let i = 0; i < d.length; i++) {
+      acc += f / sr;
+      while (acc >= 1) { acc--; const bit = (lf ^ (lf >> 1)) & 1; lf = (lf >> 1) | (bit << 14); if (short) lf = (lf & ~0x40) | (bit << 6); }
+      d[i] = (lf & 1 ? -1 : 1) * vol(v0, step, i / sr);
+    }
+  });
+}
+// 波形メモリ：4 ビットの 32 サンプル。暗い形（サインに鋸を少し）。xor はアドレス線の短絡で、読む番地が入れ替わる
+const WAVE = Array.from({ length: 32 }, (_, i) => Math.round(7.5 + 6 * Math.sin(i / 32 * 2 * Math.PI) + 1.5 * (1 - i / 16 % 2)));
+function wave(f, len, t) {
+  return buf(len, (d, sr) => {
+    let ph = 0;
+    for (let i = 0; i < d.length; i++) {
+      const xo = bendAt(t + i / sr).rxo | bendAt(t + i / sr).rxx;   // 読み出しのアドレス線のベンドが、そのまま波形の番地にもかかる
+      ph = (ph + f * 32 / sr) % 32;
+      const k = ((ph | 0) ^ (xo & 31)) & 31;
+      d[i] = (WAVE[k] / 7.5 - 1) * Math.min(1, (len - i / sr) * 40);
+    }
+  });
+}
+const cache = {};
+const once = (k, fn) => cache[k] || (cache[k] = fn());
+function sound(e, t) {
+  if (e.type === 'kick') { play(once('kick', () => pulse(220, 0.5, 0.35, 15, 2, { time: 1, shift: 1 })), t, 0.9); play(once('kclick', () => noise(0, 1, false, 0.02, 12, 1)), t, 0.4); }
+  else if (e.type === 'snare') { play(once('snare', () => noise(1, 2, false, 0.3, 15, 2)), t, 0.5); play(once('sbody', () => pulse(180, 0.5, 0.08, 10, 1, { time: 1, shift: 2 })), t, 0.3); }
+  else if (e.type === 'ghost') play(once('ghost', () => noise(2, 3, false, 0.1, 6, 1)), t, 0.5);
+  else if (e.type === 'hat') play(once('hat' + e.v, () => noise(0, 0, true, 0.05, e.v > 0.7 ? 7 : 4, 1)), t, 0.35);
+  else if (e.type === 'ohat') play(once('ohat', () => noise(0, 0, true, 0.4, 5, 4)), t, 0.3);
+  else if (e.type === 'bass') play(wave(e.f, e.len, e.t), t, 0.55);
+  else if (e.type === 'drone') {   // 12.5% の矩形波に、ゆっくりのビブラートを手で（レジスタを 1 ずつ）かける
+    play(buf(e.len, (d, sr) => { let ph = 0; for (let i = 0; i < d.length; i++) { const tt = i / sr, x = 2048 - 131072 / e.f + Math.round(Math.sin(tt * 2 * Math.PI * 4.5) * 1.2); ph = (ph + 131072 / (2048 - x) / sr) % 1; d[i] = (ph < 0.125 ? 1 : -1) * (3 + Math.min(4, tt * 3)) / 15 * Math.min(1, (e.len - tt) * 4); } }), t, 0.25);
+  }
+}
+function schedule() {
+  const ahead = ac.currentTime + 0.2;
+  for (;;) {
+    const e = EV[nextEv], t = t0 + loopN * LOOP + e.t;
+    if (t > ahead) break;
+    if (t >= ac.currentTime - 0.01) sound(e, t);
+    if (++nextEv === EV.length) { nextEv = 0; loopN++; }
+  }
+}
+function audio() {
+  if (ac) return;
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 3; comp.attack.value = 0.003; comp.release.value = 0.12;
+  const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 7000;   // 本体のアンプとイヤホン端子のぶん高域が落ちる
+  const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 25;
+  out = ac.createGain(); out.gain.value = 0.32;
+  out.connect(lp); lp.connect(hp); hp.connect(comp); comp.connect(ac.destination);
+  window.audioDest = ac.createMediaStreamDestination ? ac.createMediaStreamDestination() : null;
+  if (audioDest) comp.connect(audioDest);
+  t0 = ac.currentTime + 0.05;
+  VA.currentTime = 0; VA.play();
+  setInterval(schedule, 25); schedule();
+}
+
+// ---- 映像：カメラ → RAM のタイル → 画面 → 液晶 ----
+const GW = 128, GH = 112, TX = 16, TY = 14, NT = TX * TY;
+const sen = document.createElement('canvas'); sen.width = GW; sen.height = GH;
+const sctx = sen.getContext('2d', { willReadFrequently: true });
+const lcd = document.createElement('canvas'); lcd.width = GW; lcd.height = GH;
+const lctx = lcd.getContext('2d'), img = lctx.createImageData(GW, GH);
+const RAM = new Uint8Array(NT * 16);   // 1 タイル 16 バイト：行ごとに下位と上位のビット面
+const stuck = new Uint8Array(NT);
+const tgt = new Float32Array(GW * GH), lcdV = new Float32Array(GW * GH).fill(0.035);
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const SHADE = [0.93, 0.62, 0.3, 0.035];   // 色番号 0 が白、3 が黒（ゲームボーイと同じ向き）
+let lum = new Float32Array(GW * GH);
+
+function capture(b) {   // センサーで撮って、ディザで 4 階調にし、タイルとして RAM に書く
+  const vw = VA.videoWidth || 720, vh = VA.videoHeight || 1280, cw = vw, ch = cw * GH / GW;
+  sctx.drawImage(VA, 0, Math.max(0, vh * 0.42 - ch / 2), cw, ch, 0, 0, GW, GH);
+  const d = sctx.getImageData(0, 0, GW, GH).data;
+  for (let i = 0; i < GW * GH; i++) lum[i] = (d[i * 4] * 0.3 + d[i * 4 + 1] * 0.59 + d[i * 4 + 2] * 0.11) / 255;
+  const tile = new Uint8Array(16);
+  for (let t = 0; t < NT; t++) {
+    const dst = t | b.wor;
+    if (dst >= NT || stuck[dst]) continue;   // 書き込みが止まったタイルは前のまま。アドレスが外れた書き込みはどこにも残らない
+    const tx = t % TX, ty = t / TX | 0;
+    for (let r = 0; r < 8; r++) {
+      let lo = 0, hi = 0;
+      for (let k = 0; k < 8; k++) {
+        const x = tx * 8 + k, y = ty * 8 + r, i = y * GW + x;
+        // 輪郭強調（センサーのチップの中でやっている処理）と露出
+        const v = lum[i] * 1.5 + 0.5 * (4 * lum[i] - lum[i - 1 >= 0 ? i - 1 : i] - lum[i + 1 < lum.length ? i + 1 : i] - lum[i - GW >= 0 ? i - GW : i] - lum[i + GW < lum.length ? i + GW : i]) - 0.08;
+        const lv = Math.max(0, Math.min(3, Math.floor(v * 3 + BAYER[(y & 3) * 4 + (x & 3)] / 16)));
+        const code = 3 - lv;
+        lo |= (code & 1) << (7 - k); hi |= (code >> 1) << (7 - k);
+      }
+      tile[r * 2] = lo; tile[r * 2 + 1] = hi;
+    }
+    RAM.set(tile, dst * 16);
+  }
+}
+
+function scan(b, off) {   // 画面が 1 行ずつタイルを読む
+  for (let y = 0; y < GH; y++) {
+    const ly = off > 0 ? Math.min(y, Math.floor(GH * (1 - off))) : b.line >= 0 && y >= b.line ? b.line : y;
+    const ty = (ly >> 3) | b.ryo, r = ly & 7;
+    for (let x = 0; x < GW; x++) {
+      const tx = ((x >> 3) | b.rxo) ^ b.rxx, t = ty * TX + tx;
+      let lo = 0xff, hi = 0xff;   // 外を読むとバスが浮いて全部 1（黒）
+      if (tx < TX && ty < TY) { lo = RAM[t * 16 + r * 2]; hi = RAM[t * 16 + r * 2 + 1]; }
+      if (b.dshort) hi |= lo;
+      const bit = 7 - (x & 7), code = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+      const i = y * GW + x;
+      tgt[i] = SHADE[code];
+    }
+  }
+}
+let W, H, sc, lastCap = -1, lastT = 0;
+function setSize() {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  c.width = W; c.height = H;
+  sc = Math.floor(Math.min(W / GW, H / GH) * 0.96);
+}
+function frame() {
+  const now = ac ? ac.currentTime - t0 : 0, t = ((now % LOOP) + LOOP) % LOOP;
+  const dt = Math.max(0, Math.min(0.1, t - lastT)); lastT = t;
+  const b = t < BAR ? { rxo: 0, rxx: 0, ryo: 0, wor: 0, line: -1, dshort: false } : bendAt(t);
+  // 張り付く：キックごとにタイルのかたまりの書き込みが止まる。小節の頭で戻る（1 拍は崩れのない顔）
+  const barN = Math.floor(t / BAR);
+  const offE = lastEv(t, 'off'), off = offE ? Math.min(1, (t - offE.t) / (BAR * 0.7)) : 0;
+  stuck.fill(0);
+  for (const e of EV) {
+    if (e.t > t) break;
+    if (e.type !== 'kick' || !e.stick || e.t < barN * BAR) continue;
+    const r = hash(e.t, 5), r2 = hash(e.t, 6), w = 2 + (r * 6 | 0), h = 1 + (r2 * 4 | 0), x0 = hash(e.t, 7) * (TX - w) | 0, y0 = hash(e.t, 8) * (TY - h) | 0;
+    for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) stuck[y * TX + x] = 1;
+  }
+  if (off > 0) for (let k = 0; k < NT; k++) if (hash(k, 9) < off * 1.6) stuck[k] = 1;   // 最後：書き込みが全部止まっていく
+  // ゲームボーイカメラは 1 秒に 15 枚くらいしか撮れない
+  const cap = Math.floor(now * 15);
+  if (cap !== lastCap && VA.readyState >= 2) { capture(b); lastCap = cap; }
+  scan(b, Math.max(0, (off - 0.5) * 2));
+  // 液晶：反応が遅く、前の絵が尾を引く。電源が落ちると白に向かって消える
+  const k = 1 - Math.exp(-dt / 0.04), pw = Math.max(0, (off - 0.7) / 0.3);
+  for (let i = 0, j = 0; i < lcdV.length; i++, j += 4) {
+    lcdV[i] += ((tgt[i] * (1 - pw) + 0.93 * pw) - lcdV[i]) * (dt ? k : 1);
+    const v = lcdV[i] * 255;
+    img.data[j] = v * 0.97; img.data[j + 1] = v; img.data[j + 2] = v * 0.98; img.data[j + 3] = 255;
+  }
+  lctx.putImageData(img, 0, 0);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  const dw = GW * sc, dh = GH * sc, ox = (W - dw) >> 1, oy = (H - dh) >> 1;
+  ctx.imageSmoothingEnabled = false; ctx.drawImage(lcd, ox, oy, dw, dh);
+  // 液晶の画素のすき間
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  for (let x = 0; x <= GW; x++) ctx.fillRect(ox + x * sc, oy, 1, dh);
+  for (let y = 0; y <= GH; y++) ctx.fillRect(ox, oy + y * sc, dw, 1);
+  requestAnimationFrame(frame);
+}
+
+const ready = VA.readyState >= 2 ? Promise.resolve() : new Promise(r => VA.addEventListener('loadeddata', r, { once: true }));
+ready.then(() => requestAnimationFrame(frame));
+
+document.getElementById('aspect').onchange = setSize; setSize();
+document.getElementById('play').onclick = audio;
+c.onpointerdown = audio;
+document.getElementById('rec').onclick = e => {
+  audio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `stick_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+window.piece = { ready: () => ready, media: () => [VA], output: () => out };
+</script>
+</body>
+</html>
