@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Slab</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; background: #000; }
+  button, select { font: inherit; padding: 6px; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="16"></label>
+  <button id="rec">● 録画して保存</button>
+  <div id="msg">素材を読み込み中…</div>
+</div>
+<video src="src/hair_v1.mp4" muted playsinline preload="auto"></video>
+
+<script>
+// 白黒の人の8秒（Veo）を「縦・横・時間」の箱（3D テクスチャ）に積み、画面の各点がどの時刻を読むかを傾けられる面で決める。
+// 面が平らならふつうの動画、傾けると体が時間の帯に裂ける（スリットスキャン）。後半はカメラが引いて、箱そのものを回して見せる。
+// 120 BPM のダブテクノ、16秒（8小節）のループ。キックの頭で面の傾きが跳ぶ
+const BPM = 120, BEAT = 60 / BPM, LOOP = 32 * BEAT;   // 16秒
+const vid = document.querySelector('video');
+const hash = n => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+
+// ---- 譜面：音も映像もここから読む ----
+const EV = [];
+const ROOT = [36, 36, 32, 32, 29, 29, 31, 31];   // 小節ごとのベース：C C A♭ A♭ F F G G
+for (let b = 0; b < 32; b++) {
+  const T = b * BEAT, bar = b >> 2;
+  EV.push({ t: T, type: 'kick', v: b % 4 === 0 ? 1 : 0.85 });
+  EV.push({ t: T + BEAT / 2, type: 'hat', v: 1 }, { t: T + BEAT * 0.75, type: 'hat', v: 0.35 });
+  if (b % 4 === 1) EV.push({ t: T + BEAT / 2, type: 'stab', v: bar });
+  if (b % 4 === 3 && bar % 2 === 1) EV.push({ t: T + BEAT / 4, type: 'stab', v: bar });
+  if (b % 4 === 0) EV.push({ t: T, type: 'bass', v: ROOT[bar] });
+  // 面を切り替える：2〜4小節は2拍ごと、5〜7小節（箱を回す所）は1小節ごと。頭と最後の小節は平らに戻す
+  if ((bar >= 1 && bar <= 3 && b % 2 === 0) || (bar >= 4 && bar <= 6 && b % 4 === 0)) {
+    const ANG = [0, Math.PI / 2, Math.PI / 4, -Math.PI / 4, 0.15, Math.PI / 2 - 0.2];
+    EV.push({ t: T, type: 'cut', th: ANG[Math.floor(hash(b) * ANG.length)], m: (0.9 + 1.1 * hash(b + 50)) * (hash(b + 90) < 0.5 ? -1 : 1) });
+  }
+}
+EV.push({ t: 16 * BEAT, type: 'pad' }, { t: 28 * BEAT, type: 'rise' });
+EV.sort((a, b) => a.t - b.t);
+const lastEv = (tl, type) => { let x = null; for (const e of EV) { if (e.t > tl) break; if (e.type === type) x = e; } return x; };
+
+// ---- 音 ----
+let ac = null, t0 = 0, out = null, verbIn, dlyIn, noiseBuf, nextEv = 0, loopN = 0;
+function audio() {
+  if (ac) return;
+  startLoad();
+  ac = new AudioContext();
+  const comp = ac.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 3;
+  out = ac.createGain(); out.gain.value = 0.8; out.connect(comp); comp.connect(ac.destination);
+  window.audioDest = ac.createMediaStreamDestination ? ac.createMediaStreamDestination() : null;
+  if (audioDest) comp.connect(audioDest);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  // 残響：長く暗い
+  const L = ac.sampleRate * 5, ir = ac.createBuffer(2, L, ac.sampleRate);
+  for (let ch = 0; ch < 2; ch++) { const x = ir.getChannelData(ch); for (let i = 0; i < L; i++) x[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / L, 3); }
+  const verb = ac.createConvolver(); verb.buffer = ir; const vlp = ac.createBiquadFilter(); vlp.type = 'lowpass'; vlp.frequency.value = 3000;
+  const vg = ac.createGain(); vg.gain.value = 0.5; verbIn = ac.createGain(); verbIn.connect(verb); verb.connect(vlp); vlp.connect(vg); vg.connect(out);
+  // テープディレイ：付点4分、返りは帯域を絞って暗く（返りの中で増幅しない）
+  dlyIn = ac.createGain();
+  const dl = ac.createDelay(2), fb = ac.createGain(), hp = ac.createBiquadFilter(), lp = ac.createBiquadFilter(), dg = ac.createGain();
+  dl.delayTime.value = BEAT * 1.5; fb.gain.value = 0.58; hp.type = 'highpass'; hp.frequency.value = 280; lp.type = 'lowpass'; lp.frequency.value = 2200; dg.gain.value = 0.7;
+  dlyIn.connect(dl); dl.connect(hp); hp.connect(lp); lp.connect(fb); fb.connect(dl); lp.connect(dg); dg.connect(out); lp.connect(verbIn);
+  // 底のヒス（テープ）
+  const hs = noise(ac.currentTime, 1e5), hf = ac.createBiquadFilter(), hg = ac.createGain(); hf.type = 'bandpass'; hf.frequency.value = 5000; hf.Q.value = 0.4; hg.gain.value = 0.012;
+  hs.connect(hf); hf.connect(hg); hg.connect(out);
+  t0 = ac.currentTime + 0.05;
+  setInterval(schedule, 25); schedule();
+}
+function schedule() {   // 0.2秒先まで鳴らしておく。ループの頭で譜面を読み直す
+  for (;;) {
+    if (nextEv >= EV.length) { nextEv = 0; loopN++; }
+    const e = EV[nextEv], t = t0 + loopN * LOOP + e.t;
+    if (t > ac.currentTime + 0.2) break;
+    nextEv++;
+    if (t < ac.currentTime - 0.05) continue;
+    ({ kick, hat, stab, bass, cut, pad, rise })[e.type](t, e);
+  }
+}
+const mtof = m => 440 * 2 ** ((m - 69) / 12);
+function noise(t, len) { const n = ac.createBufferSource(); n.buffer = noiseBuf; n.loop = true; n.start(t, Math.random()); n.stop(t + len); return n; }
+function env(g, t, v, d) { g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.001, t + d); }
+function kick(t, e) {   // こもった重いキック：歪ませず、上を切って低く長く
+  const o = ac.createOscillator(), g = ac.createGain(), f = ac.createBiquadFilter();
+  f.type = 'lowpass'; f.frequency.value = 160;
+  o.frequency.setValueAtTime(90, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.14);
+  env(g, t, 1.3 * e.v, 0.7); o.connect(f); f.connect(g); g.connect(out); o.start(t); o.stop(t + 0.75);
+}
+function hat(t, e) {   // こもったハット（裏と、16分の小さい影）
+  const n = noise(t, 0.06), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.frequency.value = 7500; f.Q.value = 1.4;
+  env(g, t, 0.06 * e.v, 0.04); n.connect(f); f.connect(g); g.connect(out); if (e.v > 0.5) g.connect(dlyIn);
+}
+function stab(t, e) {   // Cm11 の短い和音：上を絞ってほとんどをディレイと残響へ。小節が進むとフィルターがわずかに開く
+  const f = ac.createBiquadFilter(), g = ac.createGain(), top = 300 + 1500 * (0.5 + 0.5 * Math.sin(e.v / 8 * Math.PI * 2 - 1));
+  f.type = 'lowpass'; f.Q.value = 8;
+  f.frequency.setValueAtTime(top, t); f.frequency.exponentialRampToValueAtTime(top * 0.35, t + 0.22);
+  env(g, t, 0.05, 0.28);
+  for (const m of [48, 51, 55, 58, 65]) for (const dt of [-7, 7]) {
+    const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(m); o.detune.value = dt;
+    o.connect(f); o.start(t); o.stop(t + 0.3);
+  }
+  f.connect(g); g.connect(out); g.connect(dlyIn); g.connect(verbIn);
+}
+function bass(t, e) {   // 1小節のサブベース
+  const o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = mtof(e.v - 12 + 12);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.4, t + 0.04); g.gain.setValueAtTime(0.4, t + 4 * BEAT - 0.1); g.gain.linearRampToValueAtTime(0, t + 4 * BEAT - 0.01);
+  o.connect(g); g.connect(out); o.start(t); o.stop(t + 4 * BEAT);
+}
+function cut(t, e) {   // 面が跳ぶ音：金属っぽいノイズを下へ掃いてディレイへ
+  const n = noise(t, 0.25), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.Q.value = 9; f.frequency.setValueAtTime(e.th > 0.5 ? 2400 : 1600, t); f.frequency.exponentialRampToValueAtTime(260, t + 0.22);
+  env(g, t, 0.22, 0.24); n.connect(f); f.connect(g); g.connect(out); g.connect(dlyIn);
+}
+function pad(t) {   // 箱を回す所の低い持続音：C と G を少しずらして、6秒かけて膨らんで消える
+  const f = ac.createBiquadFilter(), g = ac.createGain(); f.type = 'lowpass'; f.Q.value = 2;
+  f.frequency.setValueAtTime(200, t); f.frequency.linearRampToValueAtTime(900, t + 3.5); f.frequency.linearRampToValueAtTime(200, t + 6);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.09, t + 2.5); g.gain.linearRampToValueAtTime(0, t + 6);
+  for (const m of [36, 43, 48, 51]) for (const dt of [-9, 9]) { const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = mtof(m); o.detune.value = dt; o.connect(f); o.start(t); o.stop(t + 6.1); }
+  f.connect(g); g.connect(out); g.connect(verbIn);
+}
+function rise(t) {   // 最後の小節：ノイズが上がってループの頭へ
+  const n = noise(t, 2), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = 'bandpass'; f.Q.value = 3; f.frequency.setValueAtTime(300, t); f.frequency.exponentialRampToValueAtTime(5000, t + 2);
+  g.gain.setValueAtTime(0.001, t); g.gain.exponentialRampToValueAtTime(0.1, t + 1.9); g.gain.linearRampToValueAtTime(0, t + 2);
+  n.connect(f); f.connect(g); g.connect(out); g.connect(verbIn);
+}
+
+// ---- 素材を箱に積む：1/24 秒ごとに止めて、明るさだけを 3D テクスチャの1枚にする ----
+const VW = 360, VH = 640, FPS = 24, CLIP = 5.2;   // 素材は 4.5 秒から先は止まっているので、動いている頭の 5.2 秒だけを積む
+const FLARE = new Float32Array(VW * VH).map((_, j) => {   // 左上の光源のにじみを消す（箱の中で明るい柱になる）
+  const x = (j % VW) / VW, y = Math.floor(j / VW) / VH * 1.78, r = Math.hypot(x, y);
+  return Math.min(1, Math.max(0, (r - 0.12) / 0.25));
+});
+let NF = 0, loaded = false, loadP = null;
+const c = document.getElementById('c'), gl = c.getContext('webgl2', { preserveDrawingBuffer: true });
+const volT = gl.createTexture();
+const startLoad = () => loadP ??= (async () => {
+  if (vid.readyState < 1) await new Promise(r => vid.addEventListener('loadedmetadata', r, { once: true }));
+  NF = Math.floor(Math.min(CLIP, vid.duration) * FPS) - 1;
+  const cv = document.createElement('canvas'); cv.width = VW; cv.height = VH; const cx = cv.getContext('2d', { willReadFrequently: true });
+  gl.bindTexture(gl.TEXTURE_3D, volT);
+  gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R8, VW, VH, NF);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  const buf = new Uint8Array(VW * VH);
+  for (let i = 0; i < NF; i++) {
+    vid.currentTime = (i + 0.5) / FPS;
+    await new Promise(r => vid.addEventListener('seeked', r, { once: true }));
+    cx.drawImage(vid, 0, 0, VW, VH);
+    const px = cx.getImageData(0, 0, VW, VH).data;
+    for (let j = 0; j < buf.length; j++) buf[j] = (px[j * 4] * 0.3 + px[j * 4 + 1] * 0.59 + px[j * 4 + 2] * 0.11) * FLARE[j];
+    gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, i, VW, VH, 1, gl.RED, gl.UNSIGNED_BYTE, buf);
+    document.getElementById('msg').textContent = `素材を積んでいます ${i + 1}/${NF}`;
+  }
+  for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, k, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  loaded = true; document.getElementById('msg').textContent = '';
+})();
+
+// ---- 描く：正投影のレイを箱に通す ----
+// 箱の座標：横 X∈[-a/2,a/2]（a=9/16）、縦 Y∈[-1/2,1/2]、奥 Z∈[-D/2,D/2]。Z が時刻（手前ほど新しい）。
+// 面 w = fold(p + A·(位置・向き)) が「画面の各点が読む時刻」。正面から見ると、レイが面を横切る所の明るさがそのまま見える（＝2D のスリットスキャン）。
+// 箱を回すときは、面より奥（過去）の体積を黒を透かして積み、面より手前（未来）は薄く残す
+const VS = `#version 300 es
+in vec2 p; out vec2 uv; void main(){ uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0, 1); }`;
+const FS = `#version 300 es
+precision highp float; precision highp sampler3D;
+in vec2 uv; out vec4 o;
+uniform sampler3D vol; uniform vec2 res, half_; uniform float P, A, TH, yaw, pitch, zoom, vmix, opaq, seed, kick;
+const float a = 0.5625, D = 0.85;
+float fold(float w){ w = mod(w, 2.0); return w < 1.0 ? w : 2.0 - w; }
+float surf(vec2 xy){ return fold(P + A * dot(xy, vec2(cos(TH), sin(TH)))); }   // xy は箱の座標（X,Y）
+float lum(vec3 q){ return texture(vol, vec3(q.x / a + 0.5, 0.5 - q.y, 0.02 + 0.96 * (q.z / D + 0.5))).r; }
+float hash(vec2 q){ return fract(sin(dot(q, vec2(12.9898, 78.233)) + seed) * 43758.5453); }
+void main(){
+  vec2 s = (uv * 2.0 - 1.0) * half_ * zoom;
+  mat3 Ry = mat3(cos(yaw), 0, -sin(yaw), 0, 1, 0, sin(yaw), 0, cos(yaw));
+  mat3 Rx = mat3(1, 0, 0, 0, cos(pitch), sin(pitch), 0, -sin(pitch), cos(pitch));
+  mat3 R = Ry * Rx;
+  vec3 ro = R * vec3(s, 3.0), rd = R * vec3(0, 0, -1);
+  vec3 bmin = vec3(-a / 2.0, -0.5, -D / 2.0), bmax = -bmin;
+  vec3 t1 = (bmin - ro) / rd, t2 = (bmax - ro) / rd;
+  vec3 tn3 = min(t1, t2), tf3 = max(t1, t2);
+  float tn = max(max(tn3.x, tn3.y), tn3.z), tf = min(min(tf3.x, tf3.y), tf3.z);
+  vec3 col = vec3(0); float al = 0.0;
+  if (tf > tn) {
+    // 箱のふち（入った所と出た所が2つの面に近いとき）
+    vec3 pe = ro + rd * tn, px = ro + rd * tf, bh = bmax;
+    float ew = 0.004 * zoom;
+    vec3 de = bh - abs(pe), dx = bh - abs(px);
+    float edgeF = step(de.x, ew) * step(de.y, ew) + step(de.x, ew) * step(de.z, ew) + step(de.y, ew) * step(de.z, ew);
+    float edgeB = step(dx.x, ew) * step(dx.y, ew) + step(dx.x, ew) * step(dx.z, ew) + step(dx.y, ew) * step(dx.z, ew);
+    const int N = 220;
+    float dt = (tf - tn) / float(N);
+    vec3 q = pe; float sPrev = q.z / D + 0.5 - surf(q.xy);
+    for (int i = 1; i <= N; i++) {
+      if (al > 0.98) break;
+      vec3 qn = ro + rd * (tn + dt * float(i));
+      float w = qn.z / D + 0.5, sp = surf(qn.xy), sv = w - sp;
+      if (sign(sv) != sign(sPrev)) {   // 面を横切った：その点の時刻の明るさを置く
+        float f = sPrev / (sPrev - sv);
+        vec3 qc = mix(q, qn, f); float zc = (surf(qc.xy) - 0.5) * D;
+        float l = lum(vec3(qc.xy, zc));
+        float aa = mix(smoothstep(0.03, 0.3, l), 1.0, opaq);
+        col += (1.0 - al) * l * aa; al += (1.0 - al) * aa;
+      }
+      if (vmix > 0.001) {   // 体積：過去は濃く、未来は薄く
+        float l = lum(qn);
+        float dn = smoothstep(0.12, 0.5, l) * (sv < 0.0 ? 1.0 : 0.22) * vmix * dt * 14.0;
+        col += (1.0 - al) * l * dn * 1.15; al += (1.0 - al) * dn;
+      }
+      sPrev = sv; q = qn;
+    }
+    col += vmix * 0.55 * edgeF + vmix * 0.2 * edgeB * (1.0 - al);
+  }
+  float g = hash(uv * res) - 0.5;
+  vec3 c = pow(col, vec3(1.15)) + g * (0.05 + 0.04 * kick);
+  o = vec4(c, 1);
+}`;
+function prog(vs, fs) {
+  const pr = gl.createProgram();
+  for (const [t, s] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const sh = gl.createShader(t); gl.shaderSource(sh, s); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(pr, sh);
+  }
+  gl.linkProgram(pr); const U = {}; pr.u = n => U[n] ??= gl.getUniformLocation(pr, n); return pr;
+}
+const P_MAIN = prog(VS, FS);
+const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+let W, H;
+function setSize() { [W, H] = document.getElementById('aspect').value.split('x').map(Number); c.width = W; c.height = H; }
+const sm = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+// ループの中の時刻 tl から、面と箱の向きを決める
+function state(tl) {
+  const p = 0.03 + 0.94 * (tl < LOOP / 2 ? tl / (LOOP / 2) : 2 - tl / (LOOP / 2));   // 素材は8秒を行って戻る
+  const k = lastEv(tl, 'kick'), kHit = k ? Math.exp(-(tl - k.t) * 7) : 0;
+  const e = lastEv(tl, 'cut');
+  const gate = sm(1.6, 2.0, tl) * (1 - sm(13.6, 15.2, tl));   // 頭と最後は平ら
+  let A = 0, TH = 0;
+  if (e) { const dt = tl - e.t; A = e.m * (0.55 + 0.45 * Math.exp(-dt * 3)) * gate; TH = e.th; }
+  A += 0.04 * kHit * gate;
+  const k3 = sm(8, 9.6, tl) * (1 - sm(13.4, 15.4, tl));   // 箱を見せる区間
+  const u = (tl - 8) / 6;
+  return { p, A, TH, kHit, k3, yaw: k3 * (-0.75 + 1.5 * u), pitch: k3 * 0.3, vmix: k3, opaq: 1 - 0.9 * k3 };
+}
+
+let frameN = 0;
+function frame() {
+  requestAnimationFrame(frame);
+  gl.viewport(0, 0, W, H);
+  if (!loaded) { gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); return; }
+  const tl = ac ? ((ac.currentTime - t0) % LOOP + LOOP) % LOOP : 0;
+  const S = state(tl);
+  const r = W / H, a = 0.5625;
+  const half = r < a ? [0.5 * r, 0.5] : [a / 2, a / 2 / r];   // 正面で画面を埋める大きさ
+  const zoomFit = Math.max(1.25, 0.68 / half[1]);
+  gl.useProgram(P_MAIN);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, volT); gl.uniform1i(P_MAIN.u('vol'), 0);
+  gl.uniform2f(P_MAIN.u('res'), W, H); gl.uniform2f(P_MAIN.u('half_'), half[0], half[1]);
+  gl.uniform1f(P_MAIN.u('P'), S.p); gl.uniform1f(P_MAIN.u('A'), S.A); gl.uniform1f(P_MAIN.u('TH'), S.TH);
+  gl.uniform1f(P_MAIN.u('yaw'), S.yaw); gl.uniform1f(P_MAIN.u('pitch'), S.pitch);
+  gl.uniform1f(P_MAIN.u('zoom'), (1 + (zoomFit - 1) * S.k3) * (1 - 0.03 * S.kHit * S.k3));
+  gl.uniform1f(P_MAIN.u('vmix'), S.vmix); gl.uniform1f(P_MAIN.u('opaq'), S.opaq);
+  gl.uniform1f(P_MAIN.u('seed'), (++frameN % 97) * 0.37); gl.uniform1f(P_MAIN.u('kick'), S.kHit);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+document.getElementById('aspect').onchange = setSize; setSize();
+requestAnimationFrame(frame);
+document.getElementById('play').onclick = audio;
+c.onpointerdown = audio;
+
+document.getElementById('rec').onclick = e => {
+  audio();
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = `slab_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  rec.start(); setTimeout(() => rec.stop(), document.getElementById('dur').value * 1000);
+};
+// verytired.net のプレイヤーと render.py への窓口（README「作品側の決まり」）。素材は ready で箱に積み終えたら使わないので media は省く
+window.piece = { ready: startLoad, output: () => out };
+</script>
+</body>
+</html>
