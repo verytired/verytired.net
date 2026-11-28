@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Run</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&display=block">
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 system-ui, sans-serif; display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  #panel { width: 240px; display: grid; gap: 8px; align-content: start; }
+  canvas { max-width: min(100%, 720px); max-height: 90vh; }
+  button, select { font: inherit; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <select id="aspect">
+    <option value="1080x1350">4:5</option>
+    <option value="1080x1920">9:16</option>
+    <option value="1080x1080">1:1</option>
+  </select>
+  <button id="play">▶ 音を鳴らす</button>
+  <label>録画秒数 <input type="number" id="dur" min="3" max="60" value="18"></label>
+  <button id="rec">● 録画して保存</button>
+</div>
+<canvas id="c"></canvas>
+
+<script>
+// 曲を鳴らしているコードそのものを画面に出し、そのバイトを1つずつ壊していく。壊れるたびにコードを組み立て直して実行するので、
+// 数字が変われば音程やリズムが変わり、構文が壊れればその声部が止まる。最後の声部が止まると無音になり、エラーだけが残る
+const SRC = document.currentScript.textContent;
+
+// <song>
+function kicks(s) {
+  if (s % 4 == 0) kick(1)
+  if (s == 10) kick(0.7)
+}
+
+function snares(s) {
+  if (s == 4 || s == 12) snare(0.8)
+}
+
+function hats(s) {
+  if (s % 2 == 1) hat(0.5)
+}
+
+function bassline(s, bar) {
+  const root = [38, 34, 41, 36][bar % 4]
+  if (s % 4 != 2) saw(root, 0.15, 0.8)
+}
+
+function arpeggio(s, bar) {
+  const root = [50, 46, 53, 48][bar % 4]
+  const step = [0, 3, 7, 3, 10, 7, 3, 7]
+  sq(root + step[s % 8], 0.12, 0.3)
+}
+
+function drone(s, bar) {
+  const low = [26, 22, 29, 24][bar % 4]
+  if (s == 0) sine(low, 1.8, 0.6)
+}
+// </song>
+
+// 上の6つの関数は、この <script> の文字列から切り出して使う。画面に出すのも、壊すのも、実行するのもこの文字列
+const SONG = SRC.slice(SRC.indexOf('// <song>\n') + 10, SRC.indexOf('// </song>')).trimEnd();
+const NAMES = SONG.split('\n\n').map((b, k) => (b.match(/function\s+(\w+)/) || [, 'voice' + k])[1]);
+const API = ['kick', 'snare', 'hat', 'saw', 'sq', 'sine'];
+
+// 乱数は種から作る。比率を替えて書き出しても、同じ所が同じように壊れる
+const seed0 = +(new URLSearchParams(location.search).get('seed') || 7);
+let rng;
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+// --- コードを組み立てて実行する ---
+// 空行で区切った塊を1つの声部として、それぞれ new Function で組み立てる。組み立てに失敗した声部と、4小節のどこでも例外を投げる声部は止まったものとする
+let rec = null;   // 試しに実行するときは、鳴らす代わりにここへ書き留める
+const host = API.map(name => (...a) => { if (rec) rec.push(name + a.map(x => typeof x === 'number' ? Math.round(x * 100) : String(x)).join(',')); else sound(name, a); });
+function blocks(text) {
+  const out = []; let pos = 0;
+  for (const b of text.split('\n\n')) { out.push({ start: pos, end: pos + b.length, src: b }); pos += b.length + 2; }
+  return out;
+}
+function build(text) {
+  return blocks(text).map((b, k) => {
+    let fn = null, err = null;
+    try { fn = new Function(...API, 'return (' + b.src + ')')(...host); if (typeof fn !== 'function') { err = 'TypeError: ' + NAMES[k] + ' is not a function'; fn = null; } }
+    catch (e) { err = e.name + ': ' + e.message; }
+    return { ...b, k, fn, err, dead: !fn, line: -1 };
+  });
+}
+// 4小節ぶん試しに実行して、何を鳴らすかの一覧（sig）と、生きている声部の数を返す
+function trial(text) {
+  const vs = build(text); rec = [];
+  for (const v of vs) {
+    if (!v.fn) continue;
+    let ok = 0, last = null;
+    for (let bar = 0; bar < 4; bar++) for (let s = 0; s < 16; s++) { try { v.fn(s, bar); ok++; } catch (e) { last = e; rec.push('E' + v.k); } }
+    if (!ok) { v.dead = true; v.fn = null; v.err = last.name + ': ' + last.message; v.line = lineOf(last); }
+  }
+  const sig = rec.join('|'); rec = null;
+  return { vs, sig, alive: vs.filter(v => !v.dead).length };
+}
+// 例外の出た行（声部の中の何行目か）。new Function は前に2行足し、1行目は 'return (' と同じ行
+const lineOf = e => { const m = /<anonymous>:(\d+):\d+/.exec(e && e.stack || ''); return m ? m[1] - 3 : -1; };
+
+// --- 壊す操作 ---
+// 生きている声部の、空白でない1バイトを壊す。壊し方：±1、7bit のどれか1つを反転、1バイト抜く、1バイト重ねる
+// 何も変わらない壊し方は捨てる。始めの4回は音が変わるだけの壊し方を選び、そのあと決めた回で1つずつ声部を止める
+function applyOp(text, h) {
+  if (h.op === 'del') return text.slice(0, h.i) + text.slice(h.i + 1);
+  if (h.op === 'dup') return text.slice(0, h.i) + text[h.i] + text.slice(h.i);
+  return text.slice(0, h.i) + String.fromCharCode(h.now) + text.slice(h.i + 1);
+}
+// 止める回は決めておく（12回のうち 5・7・9・10・11・12 回目）。最後の声部は最後の回に止まる
+const KILLS = [4, 6, 8, 9, 10, 11];
+function pickHit(text, cur, left) {
+  const wantKill = KILLS.includes(HITS - left) || cur.alive >= left;
+  const cand = [], digits = [];
+  for (const v of cur.vs) if (!v.dead) for (let i = v.start; i < v.end; i++) if (text.charCodeAt(i) > 32) { cand.push(i); if (/\d/.test(text[i])) digits.push(i); }
+  let fallback = null;
+  for (let tries = 0; tries < 80; tries++) {
+    const pool = !wantKill && digits.length && rng() < 0.8 ? digits : cand;
+    const i = pool[rng() * pool.length | 0], old = text.charCodeAt(i), r = rng();
+    const h = r < 0.05 ? { i, old, op: 'del', now: -1 } : r < 0.1 ? { i, old, op: 'dup', now: old }
+      : { i, old, op: 'set', now: r < 0.55 ? (old + (rng() < 0.5 ? 1 : 127)) & 127 : old ^ 1 << (rng() * 7 | 0) };
+    const next = applyOp(text, h), t = trial(next);
+    if (t.sig === cur.sig && t.alive === cur.alive) continue;   // 何も変わらない
+    const kill = t.alive < cur.alive;
+    if (left === 1 && t.alive > 0) { if (kill) fallback = fallback || { h, next, t }; continue; }   // 最後の1回は全部止める
+    if (kill === wantKill || (kill && cur.alive >= left)) return { h, next, t };
+    fallback = fallback || { h, next, t };
+  }
+  return fallback;
+}
+
+// --- 画面 ---
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+let W, H, CW, CH, COLS, ROWS, OX, OY, ch2, st2, idx;
+let text = SONG, view = trial(SONG), consoleLines = [], glow = [], hits = [], focus = null, flash = 0;
+const LINES0 = SONG.split('\n').length, CONSOLE_ROWS = 7;
+const MAXW = Math.max(40, ...SONG.split('\n').map(l => l.length + 3));
+function setSize() {
+  [W, H] = document.getElementById('aspect').value.split('x').map(Number);
+  c.width = W; c.height = H;
+  const rows = LINES0 + CONSOLE_ROWS + 3;
+  CW = Math.floor(Math.min(W / MAXW, H / rows / 1.4)); CH = Math.round(CW * 1.4);
+  COLS = W / CW | 0; ROWS = LINES0 + CONSOLE_ROWS + 2;
+  OX = (W - COLS * CW) / 2; OY = Math.max(CH, (H - rows * CH) / 2);
+  [ch2, st2] = [0, 0].map(() => new Uint8Array(COLS * ROWS)); idx = new Int32Array(COLS * ROWS);
+  buildAtlas(font); layout();
+}
+const PALETTES = [
+  ['#050505', '#e6e6e6', '#4a4a4a', '#c6ff00', '#ff2d6f', '#00e5ff', '#ff9e00', '#7a5cff'],
+  ['#efeae0', '#1a1a1a', '#a59f94', '#ff4f00', '#0047ff', '#00a86b', '#e60073', '#222222'],
+  ['#001a0e', '#7dff9a', '#1f6b38', '#d4ffde', '#00ff66', '#b0ffc4', '#3dd668', '#0b8f3a'],
+  ['#0a0a1e', '#d8d8ff', '#45457a', '#ffe14d', '#ff5c8a', '#5cf2ff', '#ffa94d', '#9d7bff'],
+];
+const RED = '#ff2a2a';
+let pal = 0, BG, FG, STYLES;
+// [文字色, 地の色]。識別子、( ) [ ]、薄い字、キーワード、文字列、数値、演算子、+、{ }、反転（壊れた字）
+function setPalette(i) {
+  const [bg, fg, dim, c1, c2, c3, c4, c5] = PALETTES[i % PALETTES.length];
+  BG = bg; FG = fg;
+  STYLES = [[fg], [c4], [dim], [bg, c1], [bg, c2], [bg, c3], [bg, dim], [bg, c5], [bg, c4], [bg, fg]];
+}
+setPalette(0);
+const TOKEN = /(\/\/.*|\/\*[\s\S]*?(?:\*\/|$))|('[^']*'?|`[^`]*`?|"[^"]*"?)|(\b\d[\w.]*)|(\b(?:const|let|function|return|if|else|for|while|new|of|in|true|false)\b)|([A-Za-z_$][\w$]*)|(\+(?![+=]))|([=+\-*/<>!&|?:%^~]+)|([{}])|([()[\]])|([;,.])/g;
+const GSTYLE = [2, 4, 5, 3, 0, 7, 6, 8, 1, 0];
+// コードを色分けして画面のマスに並べる。止まった声部は薄い字にする
+function layout() {
+  const sty = new Uint8Array(text.length);
+  for (const m of text.matchAll(TOKEN)) sty.fill(GSTYLE[m.slice(1).findIndex(v => v !== undefined)], m.index, m.index + m[0].length);
+  for (const v of view.vs) if (v.dead) sty.fill(2, v.start, v.end);
+  ch2.fill(0); st2.fill(0); idx.fill(-1);
+  for (let i = 0, x = 1, y = 0; i < text.length && y < ROWS - CONSOLE_ROWS - 1; i++) {
+    const b = text.charCodeAt(i);
+    if (b === 10) { y++; x = 1; continue; }
+    if (x < COLS) { const k = y * COLS + x++; idx[k] = i; if (b >= 32 && b < 127) { ch2[k] = b - 32; st2[k] = sty[i]; } else { ch2[k] = 95; st2[k] = 6; } }
+  }
+}
+const rowOf = i => { const k = idx.indexOf(i); return k < 0 ? null : [k % COLS, k / COLS | 0]; };
+const atlas = document.createElement('canvas');
+let font = 'monospace';
+function buildAtlas(font) {
+  if (!CW) return;
+  atlas.width = 96 * CW; atlas.height = STYLES.length * CH;
+  const a = atlas.getContext('2d');
+  a.clearRect(0, 0, atlas.width, atlas.height);
+  a.font = `40px ${font}`; const size = 40 * CW / a.measureText('M').width;
+  a.font = `${size}px ${font}, monospace`; a.textBaseline = 'middle'; a.textAlign = 'center';
+  STYLES.forEach(([fg, bg], s) => {
+    if (bg) { a.fillStyle = bg; a.fillRect(0, s * CH, atlas.width, CH); }
+    a.fillStyle = fg;
+    for (let i = 0; i < 96; i++) for (const o of [0, 1]) a.fillText(i < 95 ? String.fromCharCode(32 + i) : '▒', i * CW + CW / 2 + o, s * CH + CH / 2 + 1);
+  });
+}
+
+// --- 音 ---
+// 120BPM、16分で1マス。1周は9小節：2小節は壊れていないコードで鳴らし、3小節目から2拍ごとに1バイト壊す（12回）。
+// 8小節目の後半で最後の声部が止まり、9小節目は無音でエラーだけが残る。10小節目の頭でコードを元に戻す
+const BPM = 120, ST = 60 / BPM / 4, CYCLE = 144, HIT0 = 32, HITS = 12, events = [];
+let step = 0, ac, an, out, audioDest, fft, noise, crush, space, T = 0, curV = -1;
+let atext = SONG, acur = trial(SONG);   // 音の側のコード（画面の側より少し先に進む）
+function startAudio() {
+  if (ac) return ac.resume();
+  ac = new AudioContext();
+  out = ac.createGain(); out.gain.value = 0.5;
+  const lim = ac.createDynamicsCompressor(); lim.threshold.value = -12; lim.ratio.value = 12; lim.attack.value = 0.002;
+  out.connect(lim);
+  an = ac.createAnalyser(); an.fftSize = 1024; an.smoothingTimeConstant = 0.6; fft = new Uint8Array(an.frequencyBinCount);
+  lim.connect(an); lim.connect(ac.destination); lim.connect(audioDest = ac.createMediaStreamDestination());
+  crush = ac.createWaveShaper(); crush.curve = Float32Array.from({ length: 4096 }, (_, i) => Math.round((i / 2047.5 - 1) * 6) / 6); crush.connect(out);
+  const ir = ac.createBuffer(2, ac.sampleRate * 2.5, ac.sampleRate);
+  for (let k = 0; k < 2; k++) { const d = ir.getChannelData(k); for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 3; }
+  space = ac.createGain(); space.gain.value = 0.3;
+  const rev = ac.createConvolver(); rev.buffer = ir; space.connect(rev).connect(out);
+  const buf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  noise = () => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; s.loopStart = Math.random(); return s; };
+  let next = ac.currentTime + 0.1;
+  setInterval(() => { while (next < ac.currentTime + 0.2) { play(step++, next); next += ST; } }, 25);
+}
+function env(t, a, dcy, peak, node) { node.gain.setValueAtTime(0, t); node.gain.linearRampToValueAtTime(peak, t + a); node.gain.exponentialRampToValueAtTime(1e-4, t + a + dcy); }
+const mtof = m => 440 * 2 ** ((m - 69) / 12);
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+// 壊れたコードが何を渡しても、音量・長さ・音程はこの範囲に収める（割れさせない）
+function sound(name, a) {
+  if (!ac || a.some(x => typeof x !== 'number' || !isFinite(x))) return;
+  const t = T;
+  events.push({ t, type: 'line', v: curV, line: lineOf(new Error()) });
+  if (name === 'kick') { const v = clamp(a[0], 0, 1), o = ac.createOscillator(), g = ac.createGain(); o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.1); env(t, 0.001, 0.35, 1.1 * v, g); o.connect(g).connect(out); o.start(t); o.stop(t + 0.4); return; }
+  if (name === 'snare') { const v = clamp(a[0], 0, 1), n = noise(), f = ac.createBiquadFilter(), g = ac.createGain(); f.type = 'bandpass'; f.frequency.value = 1500; f.Q.value = 0.7; env(t, 0.001, 0.18, 0.8 * v, g); n.connect(f).connect(g).connect(crush); g.connect(space); n.start(t); n.stop(t + 0.25); return; }
+  if (name === 'hat') { const v = clamp(a[0], 0, 1), n = noise(), f = ac.createBiquadFilter(), g = ac.createGain(); f.type = 'highpass'; f.frequency.value = 7000; env(t, 0.0005, 0.03, 0.3 * v, g); n.connect(f).connect(g).connect(out); n.start(t); n.stop(t + 0.06); return; }
+  const m = clamp(a[0], 12, 96), len = clamp(a[1] ?? 0.1, 0.02, 2), v = clamp(a[2] ?? 0.5, 0, 1);
+  const o = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain();
+  o.frequency.value = mtof(m); f.type = 'lowpass';
+  if (name === 'saw') { o.type = 'sawtooth'; f.frequency.setValueAtTime(900, t); f.frequency.exponentialRampToValueAtTime(160, t + len); env(t, 0.003, len, 0.35 * v, g); }
+  else if (name === 'sq') { o.type = 'square'; f.frequency.value = 1400; env(t, 0.002, len, 0.12 * v, g); g.connect(space); }
+  else { o.type = 'sine'; f.frequency.value = 2000; g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.5 * v, t + 0.3); g.gain.exponentialRampToValueAtTime(1e-4, t + len + 0.8); g.connect(space); }
+  o.connect(f).connect(g).connect(out); o.start(t); o.stop(t + len + 1);
+}
+function play(step, t) {
+  const cyc = step % CYCLE, bar = cyc / 16 | 0, s = cyc % 16;
+  if (cyc === 0) { rng = mulberry(seed0 + (step / CYCLE | 0)); atext = SONG; acur = trial(SONG); events.push({ t, type: 'reset', first: step === 0 }); }
+  const k = (cyc - HIT0) / 8;
+  if (k >= 0 && k < HITS && Number.isInteger(k) && acur.alive) {
+    const r = pickHit(atext, acur, HITS - k);
+    if (r) { atext = r.next; acur = r.t; events.push({ t, type: 'hit', h: r.h }); }
+  }
+  if (bar >= 8) return;
+  T = t;
+  for (const v of acur.vs) { if (v.dead) continue; curV = v.k; try { v.fn(s, bar); } catch (e) { events.push({ t, type: 'error', v: v.k, msg: e.name + ': ' + e.message, line: lineOf(e) }); } }
+  curV = -1;
+}
+
+// --- 映像 ---
+function addConsole(msg, name) { consoleLines.push(`\u2716 ${name}: ${msg}`); }
+function onEvent(e) {
+  if (e.type === 'reset') { text = SONG; view = trial(SONG); consoleLines = []; glow = []; hits = []; focus = null; if (!e.first) { setPalette(++pal); buildAtlas(font); flash = 1; } layout(); }
+  if (e.type === 'hit') {
+    const before = view;
+    hits.push({ i: e.h.i, life: 1 }); focus = { ...e.h, life: 1 };
+    text = applyOp(text, e.h); view = trial(text);
+    // 新しく止まった声部は、壊れた字のある行（実行時のエラーはその行）を赤く残し、エラーを下に出す
+    for (const v of view.vs) if (v.dead && !before.vs.find(b => b.k === v.k && b.dead)) {
+      v.failRow = v.line >= 0 ? v.line : text.slice(v.start, e.h.i).split('\n').length - 1;
+      addConsole(v.err, NAMES[v.k] || 'voice' + v.k);
+    }
+    for (const v of view.vs) { const b = before.vs.find(b => b.k === v.k); if (v.dead && b && b.failRow !== undefined) v.failRow = b.failRow; }
+    layout();
+  }
+  if (e.type === 'line' && e.v >= 0) { const v = view.vs[e.v]; if (v && !v.dead) glow.push({ i: v.start, line: e.line, life: 1 }); }
+}
+function frame() {
+  requestAnimationFrame(frame);
+  while (ac && events.length && events[0].t <= ac.currentTime) onEvent(events.shift());
+  flash *= 0.8;
+  ctx.fillStyle = flash > 0.1 ? '#ffffff' : BG; ctx.fillRect(0, 0, W, H);
+  if (flash > 0.1) return;
+  ctx.save(); ctx.translate(OX, OY);
+  // 鳴った行を光らせる：その音を鳴らした関数の、呼んだ行
+  const lineRow = (start, line) => { const p = rowOf(start); return p ? p[1] + line : -1; };
+  for (const g of glow) {
+    const y = lineRow(g.i, g.line); if (y < 0) continue;
+    ctx.globalAlpha = g.life * 0.3; ctx.fillStyle = STYLES[3][1]; ctx.fillRect(CW * 0.5, y * CH, (COLS - 1) * CW, CH);
+  }
+  ctx.globalAlpha = 1;
+  glow = glow.filter(g => (g.life -= 0.16) > 0);
+  // 止まった声部の、壊れた行は赤い帯
+  for (const v of view.vs) if (v.dead && v.failRow !== undefined) {
+    const y = lineRow(v.start, v.failRow); if (y < 0) continue;
+    ctx.fillStyle = RED; ctx.globalAlpha = 0.85; ctx.fillRect(CW * 0.5, y * CH, (COLS - 1) * CW, CH); ctx.globalAlpha = 1;
+  }
+  for (let y = 0, i = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++, i++) {
+    if (!ch2[i] && STYLES[st2[i]].length < 2) continue;
+    ctx.drawImage(atlas, ch2[i] * CW, st2[i] * CH, CW, CH, x * CW, y * CH, CW, CH);
+  }
+  for (const h of hits) {
+    const q = rowOf(h.i); if (!q) continue;
+    const k = q[1] * COLS + q[0];
+    ctx.globalAlpha = h.life; ctx.drawImage(atlas, ch2[k] * CW, 9 * CH, CW, CH, q[0] * CW, q[1] * CH, CW, CH); ctx.globalAlpha = 1;
+  }
+  hits = hits.filter(h => (h.life -= 0.03) > 0);
+  // コンソール：止まった声部のエラーを赤で積む
+  const cy0 = (ROWS - CONSOLE_ROWS) * CH;
+  ctx.font = `${CH * 0.85}px ${font}, monospace`; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  ctx.fillStyle = STYLES[2][0]; ctx.fillRect(CW * 0.5, cy0 - CH * 0.6, (COLS - 1) * CW, 2);
+  consoleLines.slice(-6).forEach((l, j) => {   // 長いエラーは字を小さくして1行に収める
+    const fs = Math.min(CH * 0.85, CH * 0.85 * (COLS - 1.5) * CW / ctx.measureText(l).width);
+    ctx.save(); ctx.font = `${fs}px ${font}, monospace`; ctx.fillStyle = RED; ctx.fillText(l, CW, cy0 + j * CH * 1.1 + CH * 0.3); ctx.restore();
+  });
+  // 壊れた1字は、元の字 → 壊れた後の字 を大きく出す
+  if (focus) {
+    const q = rowOf(focus.i) || rowOf(focus.i - 1);
+    if (q) {
+      const show = b => b < 0 ? '∅' : b === 32 ? '␣' : b >= 32 && b < 127 ? String.fromCharCode(b) : '▒';
+      const z = Math.min(1, focus.life * 3), size = CH * (2.6 + 1.6 * z), label = ` ${show(focus.old)} → ${show(focus.now)} `;
+      ctx.font = `${size}px ${font}, monospace`; ctx.textAlign = 'center';
+      const w = ctx.measureText(label).width, cx = Math.min(COLS * CW - w / 2 - 10, Math.max(w / 2 + 10, (q[0] + 0.5) * CW)), cy = Math.max(size * 0.6, (q[1] + 0.5) * CH - size * 0.9);
+      ctx.fillStyle = FG; ctx.fillRect(cx - w / 2, cy - size * 0.55, w, size * 1.1);
+      ctx.fillStyle = BG; ctx.fillText(label, cx, cy + 4);
+      ctx.strokeStyle = FG; ctx.lineWidth = 4; ctx.strokeRect(q[0] * CW - 6, q[1] * CH - 6, CW + 12, CH + 12);
+    }
+    if ((focus.life -= 0.022) <= 0) focus = null;
+  }
+  ctx.restore();
+}
+
+document.fonts.load('20px VT323').catch(() => {}).then(() => {
+  font = document.fonts.check('20px VT323') ? 'VT323' : 'monospace';
+  document.getElementById('aspect').onchange = setSize; setSize();
+  requestAnimationFrame(frame);
+});
+document.getElementById('play').onclick = startAudio;
+c.onpointerdown = startAudio;
+document.getElementById('rec').onclick = e => {
+  startAudio(); step = 0;
+  const btn = e.target, type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  const stream = c.captureStream(30);
+  audioDest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  const r = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  r.ondataavailable = ev => chunks.push(ev.data);
+  r.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(window.lastBlob = new Blob(chunks, { type }));
+    a.download = `run_${Date.now()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; a.click();
+    btn.disabled = false; btn.textContent = '● 録画して保存';
+  };
+  btn.disabled = true; btn.textContent = '録画中…';
+  r.start(); setTimeout(() => r.stop(), document.getElementById('dur').value * 1000);
+};
+window.piece = { output: () => out };
+</script>
+</body>
+</html>
